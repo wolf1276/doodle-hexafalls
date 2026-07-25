@@ -1,6 +1,8 @@
 # Escrow Program — Architecture
 
-Status: **Production Ready**. Program: `programs/escrow` (Anchor, `declare_id!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS")`).
+Status: **Implemented and internally audited; not deployed.** Program: `programs/escrow` (Anchor, `declare_id!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS")`).
+
+The escrow program owns **both** the gig lifecycle and the milestone escrow. The empty `programs/gig` directory is a leftover scaffold, not a separate program: gig state lives here so that a milestone release can advance gig status atomically in one instruction.
 
 ## 1. Protocol Overview
 
@@ -13,7 +15,7 @@ PayGig splits on-chain responsibility into independent programs instead of one m
 └─────────────┘      └──────────────┘      └────────────────┘
 ```
 
-The Escrow program is the only one live and audited today. It owns exactly one job: **hold client funds and release them to the freelancer according to a fixed set of rules.** It has no knowledge of ratings, disputes, or reputation.
+Escrow and Reputation are both implemented and internally audited; the Dispute program is an empty placeholder. Neither program is deployed to a public cluster yet. Escrow owns exactly one job: **hold client funds and release them to the freelancer according to a fixed set of rules** (plus the gig-listing state that job runs against). It has no knowledge of ratings, disputes, or reputation.
 
 ## 2. Why Escrow Only Manages Payments
 
@@ -40,17 +42,26 @@ This separation is intentional, not an oversight:
 Gig {
   id: u64
   client: Pubkey
-  freelancer: Pubkey
-  mint: Pubkey            // SPL mint every milestone is funded in (e.g. USDC)
+  freelancer: Pubkey       // Pubkey::default() until assign_freelancer
+  mint: Pubkey             // SPL mint every milestone is funded in (e.g. USDC)
   milestone_count: u32
   active_milestone: u32
-  status: GigStatus        // Active | Completed | Cancelled
+  status: GigStatus        // Draft | Published | Assigned | Completed | Cancelled | Archived
   created_at: i64
+  updated_at: i64
+  title: String            // <= MAX_TITLE_LEN (100)
+  description: String      // <= MAX_DESCRIPTION_LEN (500)
+  skills: String           // <= MAX_SKILLS_LEN (200); empty at init, set via update_gig
+  category: String         // <= MAX_CATEGORY_LEN (50)
+  budget: u64              // > 0; advertised budget, independent of milestone amounts
+  deadline: i64            // must be > now + MIN_DEADLINE_SECS (1 day)
   bump: u8
 }
 ```
 
 One `Gig` account exists per engagement between a client and a freelancer. It is the root of trust for every other account in the tree — `has_one` constraints on `client`/`freelancer` throughout the program all resolve back to this account.
+
+The gig also carries its own marketplace metadata (title, description, skills, category, budget, deadline), so a listing is fully describable from on-chain state without an off-chain database. `budget` is advertised intent; the amounts actually escrowed are the per-milestone `amount` fields.
 
 ### 4.2 Milestone Account (PDA)
 
@@ -96,11 +107,35 @@ Gig (1) ──┬──< Milestone (N, seeded by gig + index)
 
 ## 5. Instruction Flow / State Machine
 
+The program exposes **14 instructions** in two layers: six gig-lifecycle instructions that move `GigStatus`, and eight milestone/escrow instructions that move `MilestoneStatus` and tokens.
+
+### 5.1 Gig lifecycle
+
 ```
-initialize_gig
+initialize_gig ──► Draft ──publish_gig──► Published ──assign_freelancer──► Assigned
+                     │                        │                              │
+                  update_gig                  │                        complete_gig
+                  (Draft only)                │                              │
+                     │                        │                              ▼
+                     └──────── cancel_gig ────┴──────────────►          Completed ──archive_gig──► Archived
+                                              │
+                                              ▼
+                                          Cancelled
+```
+
+- `update_gig` is valid only in `Draft`; once published, listing metadata is frozen.
+- `assign_freelancer` requires `Published`, rejects the client assigning themselves, and rejects reassignment once `gig.freelancer` is set.
+- `cancel_gig` is valid from `Draft`, `Published`, or `Assigned`. `Completed`, `Cancelled`, and `Archived` are terminal.
+- `complete_gig` lets a client close an `Assigned` gig directly; the milestone path (§5.2) also flips the gig to `Completed` when the final milestone settles.
+- Every one of these six instructions requires the client's signature and `has_one = client`.
+
+### 5.2 Milestone / escrow flow
+
+```
+create_milestone (requires gig.status == Assigned)
       │
       ▼
-create_milestone ──► Milestone::PendingFunding
+Milestone::PendingFunding
       │
       ▼ fund_milestone (client transfer_checked → vault)
 Milestone::Funded
@@ -119,7 +154,7 @@ Milestone::Submitted ──► submitted_at = now
 
 `cancel_before_funding` is the only exit from `PendingFunding`: it closes the milestone (rent refunded to client) and marks the gig `Cancelled`. It is unavailable once a milestone has been funded — funds can only leave the vault through `approve_milestone`, `partial_timeout_release`, or `full_timeout_release`.
 
-When the last milestone under a gig reaches `Completed` (via approval or full timeout), `Gig.status` flips to `Completed` in the same instruction — there is no separate "close gig" step.
+When the last milestone under a gig reaches `Completed` (via approval or full timeout), `Gig.status` flips to `Completed` in the same instruction — no separate closing call is required. A client may also close an `Assigned` gig directly with `complete_gig` (§5.1), which is the path for a gig with no remaining milestones. `archive_gig` then moves a `Completed` gig out of the active set.
 
 ## 6. Event Architecture
 
@@ -134,9 +169,14 @@ Every state-changing instruction emits a typed Anchor event (`programs/escrow/sr
 | `MilestoneApproved` | `approve_milestone` |
 | `PartialReleaseExecuted` | `partial_timeout_release` |
 | `FullReleaseExecuted` | `full_timeout_release` |
-| `GigCancelled` | `cancel_before_funding` |
+| `GigUpdated` | `update_gig` |
+| `GigPublished` | `publish_gig` |
+| `FreelancerAssigned` | `assign_freelancer` |
+| `GigCompleted` | `complete_gig` |
+| `GigArchived` | `archive_gig` |
+| `GigCancelled` | `cancel_gig` (with `milestone = Pubkey::default()`, `index = 0`) and `cancel_before_funding` (with the closed milestone's key and index) |
 
-Coverage is verified directly (`tests/events.rs`, 10 tests) — every instruction's event fields are asserted against the instruction's actual effects.
+Thirteen events in total, one per state-changing instruction. Coverage is verified directly (`tests/events.rs`, 14 tests) — every instruction's event fields are asserted against the instruction's actual effects.
 
 ## 7. Token Flow / SPL Token CPI Architecture
 
@@ -166,8 +206,8 @@ Every PDA in this program is derived from `Pubkey::find_program_address(seeds, p
 
 | PDA | Seeds | Rationale |
 |---|---|---|
-| **Gig PDA** | `[GIG_SEED, id.to_le_bytes()]` | `id` is caller-supplied and unique per gig; deriving from it means the client and freelancer never need to pass around a generated address out-of-band — anyone can recompute the gig's address from its `id` alone |
-| **Milestone PDA** | `[MILESTONE_SEED, gig.key(), index.to_le_bytes()]` | Binds every milestone to its exact parent gig and its sequential position; two different gigs can never collide on a milestone address, and milestone `N` for a gig is always at the same deterministic address |
+| **Gig PDA** | `[GIG_SEED, id.to_le_bytes()]` | `id` is caller-supplied; deriving from it means the client and freelancer never need to pass around a generated address out-of-band — anyone can recompute the gig's address from its `id` alone. **Note: the client is not a seed**, so gig ids share one global namespace; the first client to create id *N* owns it, and any later `initialize_gig` with the same id fails at `init`. Clients must allocate ids collision-aware (e.g. randomly) |
+| **Milestone PDA** | `[MILESTONE_SEED, gig.key(), gig.milestone_count.to_le_bytes()]` | Binds every milestone to its exact parent gig and its sequential position (the index is the gig's current `milestone_count`, incremented in the same instruction); two different gigs can never collide on a milestone address, and milestone `N` for a gig is always at the same deterministic address |
 | **Vault PDA (`EscrowVault`)** | `[VAULT_SEED, gig.key()]` | One vault per gig; deriving from the gig alone (not from a milestone) is what lets multiple milestones share a single vault and its running `total_locked`/`total_released` counters |
 | **Vault Token Account** | `[VAULT_SEED, gig.key(), b"token"]` | A distinct sub-seed from the `EscrowVault` bookkeeping PDA, so the SPL token account and the bookkeeping struct are two separately-addressable accounts even though they represent the same vault |
 
@@ -189,7 +229,7 @@ Because a PDA sits deliberately off the Ed25519 curve, no keypair exists that co
 
 - **Only the Escrow Program controls escrow funds.** The vault token account's SPL `authority` is set to the `EscrowVault` PDA (`token::authority = vault` in `fund_milestone`). Since nothing can sign for that PDA except an `invoke_signed` call issued by this exact program with these exact seeds, no other program, wallet, or validator operator can move vault funds — not even the client who funded it, and not even the deployer.
 - **Clients and freelancers cannot directly move funds.** A client cannot call `spl-token transfer` against the vault token account, because a `TokenAccount`'s SPL-level authority is the PDA, not any user wallet. The only paths that debit the vault are the three release instructions, each of which is gated by its own status/timing/signer checks before the CPI is even reached.
-- **PDA validation prevents spoofing.** Every instruction that touches a PDA re-derives and checks it via Anchor's `seeds`/`bump` (on init) or `seeds`/`bump = stored_bump` (on subsequent use) constraints, plus explicit `has_one`/`constraint`/`address` checks tying the PDA back to the expected `Gig`/`Milestone`/mint. An attacker cannot substitute an attacker-controlled account claiming to be "the vault" — Anchor rejects any account whose address doesn't match the expected derivation, and `tests/pda_security.rs` (8 tests) exercises exactly this: wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault-token mismatch, cross-gig vault substitution, and uninitialized spoofed PDAs are all asserted to fail.
+- **PDA validation prevents spoofing.** Every instruction that touches a PDA re-derives and checks it via Anchor's `seeds`/`bump` (on init) or `seeds`/`bump = stored_bump` (on subsequent use) constraints, plus explicit `has_one`/`constraint`/`address` checks tying the PDA back to the expected `Gig`/`Milestone`/mint. An attacker cannot substitute an attacker-controlled account claiming to be "the vault" — Anchor rejects any account whose address doesn't match the expected derivation, and `tests/pda_security.rs` (13 tests) exercises exactly this: wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault-token mismatch, cross-gig vault substitution, and uninitialized spoofed PDAs are all asserted to fail.
 
 ## 9. Security Model (summary — full detail in SECURITY.md)
 
@@ -205,12 +245,15 @@ The vault token account's SPL `authority` field is the `EscrowVault` PDA, which 
 | Timeout releases are permissionless | A silent client cannot hold a freelancer's payment hostage indefinitely by simply not signing anything — anyone (including automation) can trigger the timeout instructions once the deadline passes |
 | Partial (20%) before full (7d) timeout | Gives the freelancer partial relief quickly (72h) while still preserving the client's ability to dispute or object within a longer window before the remainder auto-releases |
 | No CPI to reputation/dispute programs | See §3 — isolates the audited payment path from higher-churn, less-audited logic |
+| Gig lifecycle lives in the escrow program, not a separate `gig` program | A milestone release must be able to advance `GigStatus` atomically. Splitting them would require a CPI (or a second transaction) on the money path purely for bookkeeping, widening the custody trust boundary for no gain |
+| Listing metadata (title/description/skills/category/budget/deadline) stored on-chain | A gig is fully describable from chain state alone, so an indexer or an alternative frontend needs no privileged off-chain database to render the marketplace. Cost: a larger `Gig` account and length caps enforced at every write |
+| `update_gig` restricted to `Draft` | Once a gig is published, freelancers may have evaluated it; silently mutating budget or deadline after publication would let a client bait-and-switch |
 
 ---
 
 # Reputation Program — Architecture
 
-Status: **Production Ready**. Program: `programs/reputation` (Anchor, `declare_id!("mXn62yZ4KFvPsdtMmEdGkB71jXcr17SQJHXftgPVGNB")`).
+Status: **Implemented and internally audited; not deployed.** Program: `programs/reputation` (Anchor, `declare_id!("mXn62yZ4KFvPsdtMmEdGkB71jXcr17SQJHXftgPVGNB")`).
 
 ## 11. Program Overview
 
@@ -319,7 +362,7 @@ Because every PDA is derived from public inputs (an authority pubkey, a job ID, 
 
 A PDA is deliberately computed off the Ed25519 curve, so no keypair exists that could sign for it. Combined with Anchor's `seeds`/`bump` account constraints (re-derived and matched on every instruction, exactly as in Escrow §8.3), this means:
 
-- **No one can fabricate a `UserProfile`, `Rating`, or `Badge` at an address other than its one canonical derivation** — an attacker cannot pass an account they control and claim it is "the freelancer's profile" for a given authority; the derived address would not match and Anchor's constraint check fails the transaction (§14.6, verified by `tests/pda_security.rs`, 24 tests).
+- **No one can fabricate a `UserProfile`, `Rating`, or `Badge` at an address other than its one canonical derivation** — an attacker cannot pass an account they control and claim it is "the freelancer's profile" for a given authority; the derived address would not match and Anchor's constraint check fails the transaction (§14.6, verified by `tests/pda_security.rs`, 12 tests).
 - **Program signing** is not exercised for outbound transfers here (no funds are held), but the same `invoke_signed` mechanism that protects Escrow's vault is available for any future instruction that needs the program to act as one of these PDAs.
 - **Bump seeds**: every PDA stores its own `bump`, captured at `init` via `ctx.bumps.<account>`; every later instruction constrains reuse with `bump = stored_bump`, so a caller cannot supply an alternate bump to derive a different, attacker-influenced address that happens to collide.
 
@@ -384,7 +427,7 @@ Unlike Escrow's `Gig`/`Milestone`, `UserProfile` has no discrete status enum —
 | `BadgeAwarded` | `award_badge` | |
 | `ProfileUpdated` | *(defined, not currently emitted by any instruction)* | Reserved for a future generic "profile mutated" event; today `RatingSubmitted`/`CompletionUpdated`/`BadgeAwarded` each already carry the fields an indexer needs, so nothing currently emits it. Documented here rather than silently left as dead code. |
 
-Event coverage is verified in `tests/events.rs` (20 tests) — every emitting instruction's event fields are asserted against the instruction's actual effects.
+Event coverage is verified in `tests/events.rs` (10 tests) — every emitting instruction's event fields are asserted against the instruction's actual effects.
 
 ## 18. Future CPI Compatibility
 

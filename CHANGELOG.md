@@ -2,6 +2,32 @@
 
 All notable changes to the Escrow and Reputation programs and their documentation are recorded here.
 
+Entries below the current one are kept as written at the time of release. Where an older entry says "production-ready", read it as "implementation, tests, and internal audit complete" — neither program is deployed, and neither has had an external audit. Test counts in older entries predate later suite growth; see [TESTING.md](./TESTING.md) for current figures.
+
+## [Unreleased — Escrow Gig Lifecycle]
+
+### Added
+- Six gig-lifecycle instructions on the Escrow program: `update_gig`, `publish_gig`, `assign_freelancer`, `complete_gig`, `archive_gig`, `cancel_gig` — bringing the escrow program to **14 instructions**. Gig state lives in the escrow program (the `programs/gig` directory is an empty scaffold, not a separate program) so a milestone release can advance `GigStatus` atomically in the same instruction.
+- `GigStatus` expanded from `Active | Completed | Cancelled` to the full six-state machine: `Draft → Published → Assigned → Completed → Archived`, with `Cancelled` reachable from any of the first three. `create_milestone` now requires `Assigned`, so no gig can escrow funds before a freelancer is assigned.
+- On-chain listing metadata on `Gig`: `title`, `description`, `skills`, `category`, `budget`, `deadline`, `mint`, `updated_at` — a gig is fully describable from chain state with no off-chain database. Length caps (`MAX_TITLE_LEN` 100, `MAX_DESCRIPTION_LEN` 500, `MAX_SKILLS_LEN` 200, `MAX_CATEGORY_LEN` 50) and `MIN_DEADLINE_SECS` (1 day) are enforced at every write.
+- 5 new events (`GigUpdated`, `GigPublished`, `FreelancerAssigned`, `GigCompleted`, `GigArchived`), bringing Escrow to **13 events** — still one per state-changing instruction.
+- 13 new `EscrowError` variants for gig status and input validation (`NotDraftStatus`, `NotPublishedStatus`, `NotAssignedStatus`, `NotCompletedStatus`, `TerminalStatus`, `FreelancerAlreadyAssigned`, `InvalidBudget`, `InvalidDeadline`, `TitleTooLong`, `DescriptionTooLong`, `SkillsTooLong`, `CategoryTooLong`, `MetadataTooLong`), bringing the total to **24**.
+- 6 new Escrow test modules — `lifecycle.rs` (15), `gig_creation.rs` (11), `gig_updates.rs` (12), `validation.rs` (12), `freelancer_assignment.rs` (8), `publishing.rs` (6) — bringing Escrow to **180 integration tests across 16 modules** (184 including unit tests).
+
+### Changed
+- `Gig` PDA seeds are `[GIG_SEED, id]` — the client is **not** a seed. Gig ids therefore share one global namespace: the first client to create id *N* owns it, and a later `initialize_gig` with the same id fails at `init`. Integrators must allocate ids collision-aware.
+- `initialize_gig` now creates a gig in `Draft` (previously immediately active) and takes `title`, `description`, `category`, `budget`, and `deadline`. It has no `skills` parameter; `skills` starts empty and can only be set through `update_gig`, which is `Draft`-only.
+- `assign_freelancer` replaces passing the freelancer at gig creation. It enforces `client != freelancer` and rejects reassignment once set.
+
+### Documentation
+- Rewrote [README.md](./README.md) as the canonical repository entry point, verified line-by-line against program source: implementation matrix with per-component status, full instruction reference, PDA architecture, account model, threat model, invariant list, and an explicit statement that nothing is deployed and no external audit exists.
+- Corrected test counts across all docs. Previously-published figures (106 Escrow / 145 Reputation) were inaccurate; the counted totals are **184 Escrow** and **144 Reputation** (**328** total, 0 failures).
+- Updated [ARCHITECTURE.md](./ARCHITECTURE.md) §4.1, §5, §6, §8.2, §10 for the gig lifecycle, and [SECURITY.md](./SECURITY.md) §2 and §6 for gig-status and `assign_freelancer` authority rules. Corrected a prior claim that `initialize_gig` enforced `require_keys_neq!(client, freelancer)` — that check lives in `assign_freelancer`.
+- Marked `docs/details.md` explicitly as product vision, not implementation, wherever it conflicts with program code.
+
+### Status
+- Both programs remain implemented, internally audited, and **undeployed**. No external audit has been performed.
+
 ## [Reputation Program — Production Release]
 
 ### Added

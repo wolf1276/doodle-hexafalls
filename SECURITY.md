@@ -1,6 +1,6 @@
 # Escrow & Reputation Programs — Security
 
-**Audit status: Complete for both programs.** The Escrow program (`programs/escrow`) and the Reputation program (`programs/reputation`) have each completed implementation, a full internal security audit, and their own regression/security test suite — 106 tests (Escrow) and 145 tests (Reputation) — covering every invariant documented below. No open findings in either program.
+**Audit status: internal audit complete for both programs. No external audit has been performed, and neither program is deployed.** The Escrow program (`programs/escrow`) and the Reputation program (`programs/reputation`) have each completed implementation, a full internal security audit, and their own regression/security test suite — 184 tests (Escrow) and 144 tests (Reputation) — covering every invariant documented below. No open findings in either program.
 
 Scope of this document: `programs/escrow` (§1–14) and `programs/reputation` (§15–26). The Dispute program (`programs/dispute`, unimplemented) is out of scope and tracked separately.
 
@@ -19,12 +19,13 @@ Assets at risk: SPL tokens held in vault token accounts. The program's job is to
 
 Every instruction that changes ownership-sensitive state requires the correct `Signer<'info>`:
 
-- `initialize_gig` — `client` must sign; `require_keys_neq!(client, freelancer)` prevents a gig where the same key is both parties.
+- `initialize_gig` — `client` must sign and becomes `gig.client`; `gig.freelancer` starts as `Pubkey::default()`.
+- `update_gig` / `publish_gig` / `assign_freelancer` / `complete_gig` / `archive_gig` / `cancel_gig` — `client` must sign, checked against `gig.client` via `has_one = client`. `assign_freelancer` additionally enforces `require_keys_neq!(client, freelancer)`, so a client cannot assign themselves and become both parties, and rejects reassignment once `gig.freelancer` is set (`FreelancerAlreadyAssigned`).
 - `create_milestone` / `fund_milestone` / `approve_milestone` / `cancel_before_funding` — `client` must sign, and is additionally checked against `gig.client` via `has_one = client`.
 - `submit_delivery` — `freelancer` must sign, checked against `gig.freelancer` via `has_one = freelancer`.
 - `partial_timeout_release` / `full_timeout_release` — **intentionally permissionless** (no signer requirement beyond fee-payer). This is a deliberate design choice (§ "Timeout Security" below), not a missing check.
 
-`tests/authorization.rs` (10 tests) asserts every signer-gated instruction rejects the wrong signer.
+`tests/authorization.rs` (15 tests) asserts every signer-gated instruction rejects the wrong signer; `tests/lifecycle.rs` (15 tests) and `tests/freelancer_assignment.rs` (8 tests) cover the gig-lifecycle authority and precondition rules.
 
 ## 3. Ownership & Account-Type Validation
 
@@ -39,7 +40,7 @@ Full design rationale in [ARCHITECTURE.md § PDA Architecture](./ARCHITECTURE.md
 - **PDA spoofing protection**: an attacker cannot pass an account they control and claim it is "the vault" or "the milestone" for a given gig — the derived address would not match, and Anchor's constraint check fails the transaction before any state mutation or token transfer occurs.
 - **Vault ownership guarantees**: the vault token account's SPL `authority` is set to the `EscrowVault` PDA at creation (`token::authority = vault`) and never reassigned. Because that PDA has no private key, only this program (via `invoke_signed` with the correct seeds) can ever authorize a debit.
 
-Verified by `tests/pda_security.rs` (8 tests): wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault/token-account mismatch, cross-gig vault substitution in `approve_milestone`, and spoofed-but-uninitialized PDAs are all rejected.
+Verified by `tests/pda_security.rs` (13 tests): wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault/token-account mismatch, cross-gig vault substitution in `approve_milestone`, and spoofed-but-uninitialized PDAs are all rejected.
 
 ## 5. Reinitialization & Replay Protection
 
@@ -62,7 +63,21 @@ Verified by `tests/pda_security.rs` (8 tests): wrong gig PDA, wrong milestone PD
 
 This ordering also enforces the intended timeout sequencing: `full_timeout_release` cannot fire before `partial_timeout_release` has already moved the milestone to `PartialReleased`, since that's its required precondition. `tests/state_transitions.rs` (18 tests) exhaustively exercises every valid and invalid transition.
 
-`GigStatus` (`Active → Completed | Cancelled`) is likewise checked — `create_milestone` requires `gig.status == Active`, preventing new milestones on a cancelled or already-completed gig.
+`GigStatus` (`Draft → Published → Assigned → Completed → Archived`, with `Cancelled` reachable from any of the first three) is likewise checked as an account constraint on every gig-lifecycle instruction:
+
+| Instruction | Required starting status | Error on mismatch |
+|---|---|---|
+| `update_gig` | `Draft` | `NotDraftStatus` |
+| `publish_gig` | `Draft` | `NotDraftStatus` |
+| `assign_freelancer` | `Published` | `NotPublishedStatus` |
+| `create_milestone` | `Assigned` | `InvalidStatus` |
+| `complete_gig` | `Assigned` | `NotAssignedStatus` |
+| `archive_gig` | `Completed` | `NotCompletedStatus` |
+| `cancel_gig` | `Draft`, `Published`, or `Assigned` | `InvalidStatus` |
+
+`create_milestone` requiring `Assigned` is what prevents new milestones on a draft, unpublished, cancelled, completed, or archived gig — and guarantees `gig.freelancer` is set before any money can be escrowed against the gig. `tests/lifecycle.rs` (15 tests) exercises every legal and illegal gig transition.
+
+Note that these gig-status checks are listing hygiene, not custody controls: no `GigStatus` value can release, redirect, or refund funds already locked in a milestone. Cancelling a gig does not touch a funded milestone's vault balance — that milestone still settles only through approval or the timeout path.
 
 ## 7. Checked Arithmetic — Overflow & Underflow Protection
 
@@ -131,7 +146,7 @@ The program makes exactly one class of outbound CPI: `anchor_spl::token::transfe
 
 # Reputation Program — Security
 
-**Audit status: Complete.** The Reputation program (`programs/reputation`) has completed implementation, a full internal security audit, and a 145-test regression/security suite (`cargo test -p reputation`, `programs/reputation/tests/`) covering every invariant documented below. No open findings.
+**Audit status: Complete.** The Reputation program (`programs/reputation`) has completed implementation, a full internal security audit, and a 144-test regression/security suite (`cargo test -p reputation`, `programs/reputation/tests/`) covering every invariant documented below. No open findings.
 
 ## 15. Threat Model
 
@@ -158,7 +173,7 @@ Documented rather than hidden, because an accurate security posture requires nam
 - `update_completion` / `award_badge` — the signer is constrained with `#[account(address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]`, i.e. only the one hardcoded authority pubkey is ever accepted, not merely "some signer."
 - `get_profile` — read-only, no signer required.
 
-`tests/profile_authorization.rs` (20 tests) and `tests/regressions.rs` (10 tests, including `test_authority_check_not_bypassed` and `test_self_dealing_check_not_bypassed`) assert every signer-gated instruction rejects the wrong signer.
+`tests/profile_authorization.rs` (10 tests) and `tests/regressions.rs` (10 tests, including `test_authority_check_not_bypassed` and `test_self_dealing_check_not_bypassed`) assert every signer-gated instruction rejects the wrong signer.
 
 ## 17. Ownership & Account-Type Validation
 
@@ -172,7 +187,7 @@ Full design rationale in [ARCHITECTURE.md § 14](./ARCHITECTURE.md#14-pda-archit
 - `freelancer_profile` in `submit_rating` and `profile` in `update_completion`/`award_badge`/`get_profile` are all re-derived from `[PROFILE_SEED, authority.as_ref()]` — a caller cannot pass a different authority's profile and have it accepted as "the" profile for a given authority.
 - `Badge` PDAs are seeded by `[BADGE_SEED, profile.authority, badge_type]`, so a spoofed badge account for the wrong profile or wrong type fails derivation.
 
-Verified by `tests/pda_security.rs` (24 tests): wrong profile PDA, wrong rating PDA, wrong badge PDA, wrong bump, profile-for-a-different-authority, cross-profile badge substitution, and uninitialized spoofed PDAs are all rejected.
+Verified by `tests/pda_security.rs` (12 tests): wrong profile PDA, wrong rating PDA, wrong badge PDA, wrong bump, profile-for-a-different-authority, cross-profile badge substitution, and uninitialized spoofed PDAs are all rejected.
 
 ## 19. Reinitialization & Replay Protection
 
@@ -181,7 +196,7 @@ Verified by `tests/pda_security.rs` (24 tests): wrong profile PDA, wrong rating 
 - `submit_rating`'s `Rating` PDA is seeded by `job_id` alone, so a second `submit_rating` for the same `job_id` — a replay or duplicate-rating attempt — fails at `init` time. This is the program's entire duplicate-rating defense, and it is structural (seed collision) rather than a runtime `require!` check that could be forgotten on a future code path.
 - `award_badge`'s `Badge` PDA is seeded by `(profile, badge_type)`, so a second award of the same badge type to the same profile fails at `init` time — duplicate-badge prevention, structurally enforced the same way.
 
-`tests/regressions.rs` includes `test_duplicate_prevention_not_bypassed`; `tests/rating_submission.rs` (34 tests) and `tests/badge_system.rs` (36 tests) each dedicate cases to the duplicate-`job_id`/duplicate-`badge_type` paths specifically.
+`tests/regressions.rs` includes `test_duplicate_prevention_not_bypassed`; `tests/rating_submission.rs` (17 tests) and `tests/badge_system.rs` (18 tests) each dedicate cases to the duplicate-`job_id`/duplicate-`badge_type` paths specifically.
 
 ## 20. Checked Arithmetic — Overflow & Underflow Protection
 
@@ -191,7 +206,7 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 - `average_rating` promotes through `checked_mul(rating_sum, RATING_SCALE)` then `checked_div(_, rating_count)` before a final `u32::try_from` bounds check — an overflow at any step aborts rather than wrapping or truncating silently.
 - `compute_reputation_score` (§21) uses `checked_mul`/`checked_add` for every weighted term and `saturating_sub` (not raw subtraction) for the cancellation penalty, explicitly to avoid underflow when the penalty term exceeds the weighted sum — the result is clamped to `0` rather than wrapping to a near-`u64::MAX` value.
 
-`tests/math.rs` (14 tests) and `tests/reputation_algorithm.rs` (22 tests, including `test_score_does_not_overflow_with_extreme_values`) cover boundary values including near-`u64::MAX` inputs; `src/utils.rs` also carries inline `#[cfg(test)]` unit tests (`checked_add_overflows`, `checked_sub_underflows`) exercising the helpers directly.
+`tests/math.rs` (7 tests) and `tests/reputation_algorithm.rs` (11 tests, including `test_score_does_not_overflow_with_extreme_values`) cover boundary values including near-`u64::MAX` inputs; `src/utils.rs` also carries inline `#[cfg(test)]` unit tests (`checked_add_overflows`, `checked_sub_underflows`) exercising the helpers directly.
 
 ## 21. Reputation Score & Rating Integrity
 
@@ -205,7 +220,7 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 
 ### 21.3 Rating Validation
 
-`submit_rating` requires `(MIN_RATING..=MAX_RATING).contains(&score)` i.e. `1..=5`, rejecting `0` and anything `> 5` with `ReputationError::InvalidRating`. `tests/rating_validation.rs` (18 tests) and `tests/regressions.rs::test_range_check_not_bypassed` cover the boundary.
+`submit_rating` requires `(MIN_RATING..=MAX_RATING).contains(&score)` i.e. `1..=5`, rejecting `0` and anything `> 5` with `ReputationError::InvalidRating`. `tests/rating_validation.rs` (9 tests) and `tests/regressions.rs::test_range_check_not_bypassed` cover the boundary.
 
 ### 21.4 Authority Validation for Privileged Actions
 
@@ -213,11 +228,11 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 
 ### 21.5 Deterministic Reputation Calculation
 
-`compute_reputation_score` is a pure function of `UserProfile`'s own stored fields (`completed_jobs`, `successful_jobs`, `total_earnings`, `average_rating`, `cancelled_jobs`) — a weighted sum of four capped components (success rate, average rating, completed-job volume, lifetime earnings) minus a cancellation penalty, clamped to `[0, MAX_REPUTATION_SCORE]`. No randomness, no external oracle, no off-chain input: the same stored fields always produce the same score, and any observer can recompute and verify it independently from public account data. `tests/reputation_algorithm.rs` (22 tests) includes `test_score_is_deterministic` and `test_score_equal_for_identical_inputs`.
+`compute_reputation_score` is a pure function of `UserProfile`'s own stored fields (`completed_jobs`, `successful_jobs`, `total_earnings`, `average_rating`, `cancelled_jobs`) — a weighted sum of four capped components (success rate, average rating, completed-job volume, lifetime earnings) minus a cancellation penalty, clamped to `[0, MAX_REPUTATION_SCORE]`. No randomness, no external oracle, no off-chain input: the same stored fields always produce the same score, and any observer can recompute and verify it independently from public account data. `tests/reputation_algorithm.rs` (11 tests) includes `test_score_is_deterministic` and `test_score_equal_for_identical_inputs`.
 
 ### 21.6 Badge Eligibility
 
-`is_eligible_for_badge` deterministically checks five of the seven badge types against on-chain profile fields (`FirstGig`, `TenCompletedJobs`, `HundredCompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer` and `FastDeliverer` return `true` unconditionally and rely entirely on `REPUTATION_AUTHORITY`'s judgment plus the structural one-per-type duplicate guard (§19). This split is documented in source (`utils.rs`) and in ARCHITECTURE.md §19 rather than presented as a uniform on-chain guarantee. `tests/badge_system.rs` (36 tests) covers eligibility for every badge type, including the two authority-attested ones.
+`is_eligible_for_badge` deterministically checks five of the seven badge types against on-chain profile fields (`FirstGig`, `TenCompletedJobs`, `HundredCompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer` and `FastDeliverer` return `true` unconditionally and rely entirely on `REPUTATION_AUTHORITY`'s judgment plus the structural one-per-type duplicate guard (§19). This split is documented in source (`utils.rs`) and in ARCHITECTURE.md §19 rather than presented as a uniform on-chain guarantee. `tests/badge_system.rs` (18 tests) covers eligibility for every badge type, including the two authority-attested ones.
 
 ### 21.7 Metadata Bounds
 
@@ -225,11 +240,11 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 
 ## 22. Event Correctness
 
-Every emitting instruction's event (`ProfileCreated`, `RatingSubmitted`, `CompletionUpdated`, `BadgeAwarded`) is asserted field-for-field against the instruction's actual resulting account state in `tests/events.rs` (20 tests). `ProfileUpdated` is defined but not currently emitted by any instruction — see ARCHITECTURE.md §17 — and is called out here so it is not mistaken for a monitored, silently-broken event path.
+Every emitting instruction's event (`ProfileCreated`, `RatingSubmitted`, `CompletionUpdated`, `BadgeAwarded`) is asserted field-for-field against the instruction's actual resulting account state in `tests/events.rs` (10 tests). `ProfileUpdated` is defined but not currently emitted by any instruction — see ARCHITECTURE.md §17 — and is called out here so it is not mistaken for a monitored, silently-broken event path.
 
 ## 23. State Consistency
 
-`tests/state_invariants.rs` (20 tests) directly asserts the invariants a reputation record must never violate: `completed_jobs >= successful_jobs`, `total_earnings` never decreases, `updated_at` is monotonically non-decreasing, `created_at` never changes, `average_rating` stays within `[0, 500]`, badges are unique per type, and `reputation_score` is reproducible from stored fields after an arbitrary sequence of operations (`test_all_invariants_hold_after_multiple_operations`).
+`tests/state_invariants.rs` (10 tests) directly asserts the invariants a reputation record must never violate: `completed_jobs >= successful_jobs`, `total_earnings` never decreases, `updated_at` is monotonically non-decreasing, `created_at` never changes, `average_rating` stays within `[0, 500]`, badges are unique per type, and `reputation_score` is reproducible from stored fields after an arbitrary sequence of operations (`test_all_invariants_hold_after_multiple_operations`).
 
 ## 24. Error Handling
 
