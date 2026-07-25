@@ -19,48 +19,13 @@ declare_id!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS");
 pub mod escrow {
     use super::*;
 
-    /// Creates a new gig in Draft status with title, description, category, budget, and deadline.
-    pub fn initialize_gig(
-        ctx: Context<InitializeGig>,
-        id: u64,
-        title: String,
-        description: String,
-        category: String,
-        budget: u64,
-        deadline: i64,
-    ) -> Result<()> {
-        initialize_gig::handler(ctx, id, title, description, category, budget, deadline)
-    }
-
-    /// Updates a Draft gig's metadata.
-    pub fn update_gig(
-        ctx: Context<UpdateGig>,
-        title: String,
-        description: String,
-        skills: String,
-        category: String,
-        budget: u64,
-        deadline: i64,
-    ) -> Result<()> {
-        update_gig::handler(ctx, title, description, skills, category, budget, deadline)
-    }
-
-    /// Publishes a Draft gig, making it visible for freelancer assignment.
-    pub fn publish_gig(ctx: Context<PublishGig>) -> Result<()> {
-        publish_gig::handler(ctx)
-    }
-
-    /// Assigns a freelancer to a Published gig, transitioning it to Assigned.
-    pub fn assign_freelancer(ctx: Context<AssignFreelancer>) -> Result<()> {
-        assign_freelancer::handler(ctx)
-    }
-
     /// Creates the next milestone for a gig, awaiting funding.
     pub fn create_milestone(ctx: Context<CreateMilestone>, amount: u64) -> Result<()> {
         create_milestone::handler(ctx, amount)
     }
 
     /// Funds a milestone by transferring USDC from the client into the escrow vault.
+    /// On the gig's first funding, CPIs into the gig program to move it InProgress.
     pub fn fund_milestone(ctx: Context<FundMilestone>) -> Result<()> {
         fund_milestone::handler(ctx)
     }
@@ -85,23 +50,23 @@ pub mod escrow {
         full_timeout_release::handler(ctx)
     }
 
-    /// Marks a gig as Completed.
-    pub fn complete_gig(ctx: Context<CompleteGig>) -> Result<()> {
-        complete_gig::handler(ctx)
-    }
-
-    /// Archives a Completed gig.
-    pub fn archive_gig(ctx: Context<ArchiveGig>) -> Result<()> {
-        archive_gig::handler(ctx)
-    }
-
-    /// Cancels a non-terminal gig.
-    pub fn cancel_gig(ctx: Context<CancelGig>) -> Result<()> {
-        cancel_gig::handler(ctx)
-    }
-
-    /// Cancels and closes a milestone that was never funded.
+    /// Cancels and closes a milestone that was never funded, cancelling the gig via CPI.
     pub fn cancel_before_funding(ctx: Context<CancelBeforeFunding>) -> Result<()> {
         cancel_before_funding::handler(ctx)
+    }
+
+    /// Client submits the final 1-5 rating for a completed gig, CPI-attested by escrow.
+    pub fn rate_freelancer(
+        ctx: Context<RateFreelancer>,
+        score: u8,
+        review_hash: [u8; 32],
+    ) -> Result<()> {
+        rate_freelancer::handler(ctx, score, review_hash)
+    }
+
+    /// Permissionlessly notifies the Reputation Program once a gig's vault is
+    /// fully released. Callable exactly once per gig.
+    pub fn settle_reputation(ctx: Context<SettleReputation>) -> Result<()> {
+        settle_reputation::handler(ctx)
     }
 }

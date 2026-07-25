@@ -1,10 +1,12 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Mint, TransferChecked};
+use gig::cpi::accounts::MarkCompletedByEscrow;
+use gig::Gig;
 
-use crate::constants::{FULL_TIMEOUT, VAULT_SEED};
+use crate::constants::{ESCROW_AUTHORITY_SEED, FULL_TIMEOUT, VAULT_SEED};
 use crate::errors::EscrowError;
 use crate::events::FullReleaseExecuted;
-use crate::state::{EscrowVault, Gig, GigStatus, Milestone, MilestoneStatus};
+use crate::state::{EscrowVault, Milestone, MilestoneStatus};
 use crate::utils::{checked_add, checked_sub};
 
 #[derive(Accounts)]
@@ -39,11 +41,18 @@ pub struct FullTimeoutRelease<'info> {
 
     pub mint: Account<'info, Mint>,
 
+    /// CHECK: PDA identity only; used purely as escrow's CPI-signer into the gig program.
+    #[account(seeds = [ESCROW_AUTHORITY_SEED], bump)]
+    pub escrow_authority: UncheckedAccount<'info>,
+
+    pub gig_program: Program<'info, gig::program::Gig>,
+
     pub token_program: Program<'info, Token>,
 }
 
 /// Permissionlessly releases the remaining balance once 7 days have elapsed
-/// since delivery submission without client approval.
+/// since delivery submission without client approval. CPIs into the gig program
+/// to mark it Completed once the last milestone clears.
 pub fn handler(ctx: Context<FullTimeoutRelease>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let milestone = &ctx.accounts.milestone;
@@ -58,7 +67,7 @@ pub fn handler(ctx: Context<FullTimeoutRelease>) -> Result<()> {
 
     let gig_key = ctx.accounts.gig.key();
     let vault_bump = ctx.accounts.vault.bump;
-    let signer_seeds: &[&[&[u8]]] = &[&[VAULT_SEED, gig_key.as_ref(), &[vault_bump]]];
+    let vault_signer_seeds: &[&[&[u8]]] = &[&[VAULT_SEED, gig_key.as_ref(), &[vault_bump]]];
 
     token::transfer_checked(
         CpiContext::new_with_signer(
@@ -69,7 +78,7 @@ pub fn handler(ctx: Context<FullTimeoutRelease>) -> Result<()> {
                 to: ctx.accounts.freelancer_token_account.to_account_info(),
                 authority: ctx.accounts.vault.to_account_info(),
             },
-            signer_seeds,
+            vault_signer_seeds,
         ),
         remaining,
         ctx.accounts.mint.decimals,
@@ -82,18 +91,28 @@ pub fn handler(ctx: Context<FullTimeoutRelease>) -> Result<()> {
     milestone.released = checked_add(milestone.released, remaining)?;
     milestone.status = MilestoneStatus::Completed;
 
-    let gig = &mut ctx.accounts.gig;
-    if checked_add(gig.active_milestone as u64, 1)? as u32 >= gig.milestone_count {
-        gig.status = GigStatus::Completed;
-    } else {
-        gig.active_milestone = checked_add(gig.active_milestone as u64, 1)? as u32;
-    }
+    let is_last_milestone = checked_add(vault.active_milestone as u64, 1)? as u32 >= vault.milestone_count;
+    vault.active_milestone = checked_add(vault.active_milestone as u64, 1)? as u32;
 
     emit!(FullReleaseExecuted {
         gig: gig_key,
         milestone: milestone.key(),
         amount_released: remaining,
     });
+
+    if is_last_milestone {
+        let authority_bump = ctx.bumps.escrow_authority;
+        let authority_signer_seeds: &[&[&[u8]]] = &[&[ESCROW_AUTHORITY_SEED, &[authority_bump]]];
+
+        gig::cpi::mark_completed_by_escrow(CpiContext::new_with_signer(
+            ctx.accounts.gig_program.key(),
+            MarkCompletedByEscrow {
+                escrow_authority: ctx.accounts.escrow_authority.to_account_info(),
+                gig: ctx.accounts.gig.to_account_info(),
+            },
+            authority_signer_seeds,
+        ))?;
+    }
 
     Ok(())
 }

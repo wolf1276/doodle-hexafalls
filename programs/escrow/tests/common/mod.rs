@@ -13,8 +13,9 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use spl_token_interface as spl_token;
 
-pub use escrow::state::*;
-pub use escrow::errors::EscrowError;
+pub use escrow::state::{EscrowVault, Milestone, MilestoneStatus};
+pub use gig::state::{Gig, GigStatus};
+pub use reputation::state::UserProfile;
 
 pub const USDC_DECIMALS: u8 = 6;
 pub const STANDARD_AMOUNT: u64 = 1_000_000;
@@ -36,8 +37,12 @@ pub struct Env {
 
 pub fn setup() -> Env {
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../../target/deploy/escrow.so");
-    svm.add_program(escrow::ID, bytes).unwrap();
+    let escrow_bytes = include_bytes!("../../../../target/deploy/escrow.so");
+    svm.add_program(escrow::ID, escrow_bytes).unwrap();
+    let gig_bytes = include_bytes!("../../../../target/deploy/gig.so");
+    svm.add_program(gig::ID, gig_bytes).unwrap();
+    let reputation_bytes = include_bytes!("../../../../target/deploy/reputation.so");
+    svm.add_program(reputation::ID, reputation_bytes).unwrap();
 
     let payer = Keypair::new();
     let client = Keypair::new();
@@ -179,7 +184,7 @@ pub fn verify_vault_invariant(svm: &LiteSVM, vault_key: &Pubkey, vault_token_key
 // ── PDA derivation ──
 
 pub fn gig_pda(id: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[b"gig", id.to_le_bytes().as_ref()], &escrow::ID)
+    Pubkey::find_program_address(&[b"gig", id.to_le_bytes().as_ref()], &gig::ID)
 }
 
 pub fn milestone_pda(gig: &Pubkey, index: u32) -> (Pubkey, u8) {
@@ -194,7 +199,93 @@ pub fn vault_token_pda(gig: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault", gig.as_ref(), b"token"], &escrow::ID)
 }
 
-// ── Instruction builders ──
+/// Escrow's own CPI-signer PDA, used to authorize calls into the gig program.
+pub fn escrow_authority_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"escrow_authority"], &escrow::ID)
+}
+
+pub fn reputation_profile_pda(authority: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"profile", authority.as_ref()], &reputation::ID)
+}
+
+pub fn reputation_rating_pda(job_id: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"rating", job_id.to_le_bytes().as_ref()], &reputation::ID)
+}
+
+pub fn read_reputation_profile(svm: &LiteSVM, key: &Pubkey) -> UserProfile {
+    let data = svm.get_account(key).unwrap().data;
+    UserProfile::try_deserialize(&mut &data[..]).unwrap()
+}
+
+pub fn ix_initialize_reputation_profile(authority: &Pubkey, profile: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        reputation::ID,
+        &reputation::instruction::InitializeProfile {}.data(),
+        reputation::accounts::InitializeProfile {
+            authority: *authority,
+            profile: *profile,
+            system_program: anchor_lang::solana_program::system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn init_reputation_profile(env: &mut Env, authority: &Keypair) -> Pubkey {
+    let (profile, _) = reputation_profile_pda(&authority.pubkey());
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_initialize_reputation_profile(&authority.pubkey(), &profile)],
+        &[&env.payer, authority],
+    )
+    .unwrap();
+    profile
+}
+
+pub fn ix_settle_reputation(gig: &Pubkey, vault: &Pubkey, freelancer_profile: &Pubkey) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::SettleReputation {}.data(),
+        escrow::accounts::SettleReputation {
+            gig: *gig,
+            vault: *vault,
+            escrow_authority,
+            freelancer_profile: *freelancer_profile,
+            reputation_program: reputation::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub struct RateFreelancerAccounts {
+    pub client: Pubkey,
+    pub gig: Pubkey,
+    pub freelancer: Pubkey,
+    pub freelancer_profile: Pubkey,
+    pub rating: Pubkey,
+}
+
+pub fn ix_rate_freelancer(a: &RateFreelancerAccounts, score: u8, review_hash: [u8; 32]) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::RateFreelancer { score, review_hash }.data(),
+        escrow::accounts::RateFreelancer {
+            client: a.client,
+            gig: a.gig,
+            freelancer: a.freelancer,
+            freelancer_profile: a.freelancer_profile,
+            rating: a.rating,
+            escrow_authority,
+            reputation_program: reputation::ID,
+            system_program: anchor_lang::solana_program::system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+// ── Gig instruction builders (calls into the `gig` program) ──
 
 pub fn ix_initialize_gig(
     client: &Pubkey,
@@ -208,9 +299,9 @@ pub fn ix_initialize_gig(
     deadline: i64,
 ) -> Instruction {
     Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::InitializeGig { id, title, description, category, budget, deadline }.data(),
-        escrow::accounts::InitializeGig {
+        gig::ID,
+        &gig::instruction::InitializeGig { id, title, description, category, budget, deadline }.data(),
+        gig::accounts::InitializeGig {
             client: *client,
             mint: *mint,
             gig: *gig,
@@ -231,52 +322,87 @@ pub fn ix_update_gig(
     deadline: i64,
 ) -> Instruction {
     Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::UpdateGig { title, description, skills, category, budget, deadline }.data(),
-        escrow::accounts::UpdateGig {
-            client: *client,
-            gig: *gig,
-        }
-        .to_account_metas(None),
+        gig::ID,
+        &gig::instruction::UpdateGig { title, description, skills, category, budget, deadline }.data(),
+        gig::accounts::UpdateGig { client: *client, gig: *gig }.to_account_metas(None),
     )
 }
 
 pub fn ix_publish_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::PublishGig {}.data(),
-        escrow::accounts::PublishGig {
-            client: *client,
-            gig: *gig,
-        }
-        .to_account_metas(None),
+        gig::ID,
+        &gig::instruction::PublishGig {}.data(),
+        gig::accounts::PublishGig { client: *client, gig: *gig }.to_account_metas(None),
     )
 }
 
-pub fn ix_assign_freelancer(
-    client: &Pubkey,
-    freelancer: &Pubkey,
-    gig: &Pubkey,
-) -> Instruction {
+pub fn ix_assign_freelancer(client: &Pubkey, freelancer: &Pubkey, gig: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::AssignFreelancer {}.data(),
-        escrow::accounts::AssignFreelancer {
-            client: *client,
-            freelancer: *freelancer,
-            gig: *gig,
-        }
-        .to_account_metas(None),
+        gig::ID,
+        &gig::instruction::AssignFreelancer {}.data(),
+        gig::accounts::AssignFreelancer { client: *client, freelancer: *freelancer, gig: *gig }.to_account_metas(None),
     )
 }
+
+pub fn ix_complete_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::CompleteGig {}.data(),
+        gig::accounts::CompleteGig { client: *client, gig: *gig }.to_account_metas(None),
+    )
+}
+
+pub fn ix_archive_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::ArchiveGig {}.data(),
+        gig::accounts::ArchiveGig { client: *client, gig: *gig }.to_account_metas(None),
+    )
+}
+
+pub fn ix_cancel_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::CancelGig {}.data(),
+        gig::accounts::CancelGig { client: *client, gig: *gig }.to_account_metas(None),
+    )
+}
+
+pub fn ix_mark_in_progress(escrow_authority: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::MarkInProgress {}.data(),
+        gig::accounts::MarkInProgress { escrow_authority: *escrow_authority, gig: *gig }.to_account_metas(None),
+    )
+}
+
+pub fn ix_mark_completed_by_escrow(escrow_authority: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::MarkCompletedByEscrow {}.data(),
+        gig::accounts::MarkCompletedByEscrow { escrow_authority: *escrow_authority, gig: *gig }.to_account_metas(None),
+    )
+}
+
+pub fn ix_mark_cancelled_by_escrow(escrow_authority: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        gig::ID,
+        &gig::instruction::MarkCancelledByEscrow {}.data(),
+        gig::accounts::MarkCancelledByEscrow { escrow_authority: *escrow_authority, gig: *gig }.to_account_metas(None),
+    )
+}
+
+// ── Escrow instruction builders ──
 
 pub fn ix_create_milestone(client: &Pubkey, gig: &Pubkey, milestone: &Pubkey, amount: u64) -> Instruction {
+    let (vault, _) = vault_pda(gig);
     Instruction::new_with_bytes(
         escrow::ID,
         &escrow::instruction::CreateMilestone { amount }.data(),
         escrow::accounts::CreateMilestone {
             client: *client,
             gig: *gig,
+            vault,
             milestone: *milestone,
             system_program: anchor_lang::solana_program::system_program::ID,
         }
@@ -295,6 +421,7 @@ pub struct FundAccounts {
 }
 
 pub fn ix_fund_milestone(a: &FundAccounts) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
     Instruction::new_with_bytes(
         escrow::ID,
         &escrow::instruction::FundMilestone {}.data(),
@@ -306,6 +433,8 @@ pub fn ix_fund_milestone(a: &FundAccounts) -> Instruction {
             vault_token_account: a.vault_token_account,
             client_token_account: a.client_token_account,
             mint: a.mint,
+            escrow_authority,
+            gig_program: gig::ID,
             token_program: spl_token::ID,
             system_program: anchor_lang::solana_program::system_program::ID,
         }
@@ -338,6 +467,7 @@ pub struct ReleaseAccounts {
 }
 
 pub fn ix_approve_milestone(a: &ReleaseAccounts) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
     Instruction::new_with_bytes(
         escrow::ID,
         &escrow::instruction::ApproveMilestone {}.data(),
@@ -350,6 +480,8 @@ pub fn ix_approve_milestone(a: &ReleaseAccounts) -> Instruction {
             freelancer: a.freelancer,
             freelancer_token_account: a.freelancer_token_account,
             mint: a.mint,
+            escrow_authority,
+            gig_program: gig::ID,
             token_program: spl_token::ID,
         }
         .to_account_metas(None),
@@ -383,6 +515,7 @@ pub fn ix_partial_timeout_release(a: &TimeoutAccounts) -> Instruction {
 }
 
 pub fn ix_full_timeout_release(a: &TimeoutAccounts) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
     Instruction::new_with_bytes(
         escrow::ID,
         &escrow::instruction::FullTimeoutRelease {}.data(),
@@ -393,49 +526,16 @@ pub fn ix_full_timeout_release(a: &TimeoutAccounts) -> Instruction {
             vault_token_account: a.vault_token_account,
             freelancer_token_account: a.freelancer_token_account,
             mint: a.mint,
+            escrow_authority,
+            gig_program: gig::ID,
             token_program: spl_token::ID,
         }
         .to_account_metas(None),
     )
 }
 
-pub fn ix_complete_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::CompleteGig {}.data(),
-        escrow::accounts::CompleteGig {
-            client: *client,
-            gig: *gig,
-        }
-        .to_account_metas(None),
-    )
-}
-
-pub fn ix_archive_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::ArchiveGig {}.data(),
-        escrow::accounts::ArchiveGig {
-            client: *client,
-            gig: *gig,
-        }
-        .to_account_metas(None),
-    )
-}
-
-pub fn ix_cancel_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        escrow::ID,
-        &escrow::instruction::CancelGig {}.data(),
-        escrow::accounts::CancelGig {
-            client: *client,
-            gig: *gig,
-        }
-        .to_account_metas(None),
-    )
-}
-
 pub fn ix_cancel_before_funding(client: &Pubkey, gig: &Pubkey, milestone: &Pubkey) -> Instruction {
+    let (escrow_authority, _) = escrow_authority_pda();
     Instruction::new_with_bytes(
         escrow::ID,
         &escrow::instruction::CancelBeforeFunding {}.data(),
@@ -443,6 +543,8 @@ pub fn ix_cancel_before_funding(client: &Pubkey, gig: &Pubkey, milestone: &Pubke
             client: *client,
             gig: *gig,
             milestone: *milestone,
+            escrow_authority,
+            gig_program: gig::ID,
         }
         .to_account_metas(None),
     )
@@ -549,7 +651,7 @@ pub fn create_milestone_for(env: &mut Env, gig: &Pubkey, index: u32, amount: u64
     milestone
 }
 
-/// Full harness: init gig (Draft) → publish → assign freelancer → create milestone 0 → fund.
+/// Full harness: init gig (Draft) -> publish -> assign freelancer -> create milestone 0 -> fund.
 pub fn create_funded_milestone(env: &mut Env, gig_id: u64, amount: u64) -> SetupAccounts {
     let gig = init_gig(env, gig_id);
     publish_and_assign(env, &gig);

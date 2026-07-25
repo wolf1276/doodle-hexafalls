@@ -1,10 +1,12 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Mint, TransferChecked};
+use gig::cpi::accounts::MarkInProgress;
+use gig::{Gig, GigStatus};
 
-use crate::constants::VAULT_SEED;
+use crate::constants::{ESCROW_AUTHORITY_SEED, VAULT_SEED};
 use crate::errors::EscrowError;
 use crate::events::MilestoneFunded;
-use crate::state::{EscrowVault, Gig, Milestone, MilestoneStatus};
+use crate::state::{EscrowVault, Milestone, MilestoneStatus};
 use crate::utils::checked_add;
 
 #[derive(Accounts)]
@@ -13,10 +15,13 @@ pub struct FundMilestone<'info> {
     pub client: Signer<'info>,
 
     #[account(
+        mut,
         has_one = client @ EscrowError::Unauthorized,
         has_one = mint @ EscrowError::InvalidMint,
+        constraint = gig.status == GigStatus::Assigned || gig.status == GigStatus::InProgress
+            @ EscrowError::GigNotFundable,
     )]
-    pub gig: Account<'info, Gig>,
+    pub gig: Box<Account<'info, Gig>>,
 
     #[account(
         mut,
@@ -26,11 +31,9 @@ pub struct FundMilestone<'info> {
     pub milestone: Account<'info, Milestone>,
 
     #[account(
-        init_if_needed,
-        payer = client,
-        space = EscrowVault::INIT_SPACE,
+        mut,
         seeds = [VAULT_SEED, gig.key().as_ref()],
-        bump,
+        bump = vault.bump,
     )]
     pub vault: Account<'info, EscrowVault>,
 
@@ -53,11 +56,18 @@ pub struct FundMilestone<'info> {
 
     pub mint: Account<'info, Mint>,
 
+    /// CHECK: PDA identity only; used purely as escrow's CPI-signer into the gig program.
+    #[account(seeds = [ESCROW_AUTHORITY_SEED], bump)]
+    pub escrow_authority: UncheckedAccount<'info>,
+
+    pub gig_program: Program<'info, gig::program::Gig>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
 /// Transfers `milestone.amount` in USDC from the client into the gig's escrow vault.
+/// On the gig's first funding, CPIs into the gig program to move Assigned -> InProgress.
 pub fn handler(ctx: Context<FundMilestone>) -> Result<()> {
     let amount = ctx.accounts.milestone.amount;
 
@@ -77,10 +87,8 @@ pub fn handler(ctx: Context<FundMilestone>) -> Result<()> {
 
     let vault = &mut ctx.accounts.vault;
     if vault.token_account == Pubkey::default() {
-        vault.gig = ctx.accounts.gig.key();
         vault.token_account = ctx.accounts.vault_token_account.key();
         vault.mint = ctx.accounts.mint.key();
-        vault.bump = ctx.bumps.vault;
     } else {
         require_keys_eq!(vault.mint, ctx.accounts.mint.key(), EscrowError::InvalidMint);
     }
@@ -94,6 +102,20 @@ pub fn handler(ctx: Context<FundMilestone>) -> Result<()> {
         milestone: milestone.key(),
         amount,
     });
+
+    if ctx.accounts.gig.status == GigStatus::Assigned {
+        let bump = ctx.bumps.escrow_authority;
+        let signer_seeds: &[&[&[u8]]] = &[&[ESCROW_AUTHORITY_SEED, &[bump]]];
+
+        gig::cpi::mark_in_progress(CpiContext::new_with_signer(
+            ctx.accounts.gig_program.key(),
+            MarkInProgress {
+                escrow_authority: ctx.accounts.escrow_authority.to_account_info(),
+                gig: ctx.accounts.gig.to_account_info(),
+            },
+            signer_seeds,
+        ))?;
+    }
 
     Ok(())
 }

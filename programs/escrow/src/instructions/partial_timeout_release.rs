@@ -1,10 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Mint, TransferChecked};
+use gig::Gig;
 
 use crate::constants::{PARTIAL_RELEASE_PERCENT, PARTIAL_TIMEOUT, VAULT_SEED};
 use crate::errors::EscrowError;
 use crate::events::PartialReleaseExecuted;
-use crate::state::{EscrowVault, Gig, Milestone, MilestoneStatus};
+use crate::state::{EscrowVault, Milestone, MilestoneStatus};
 use crate::utils::{checked_add, percent_of};
 
 #[derive(Accounts)]

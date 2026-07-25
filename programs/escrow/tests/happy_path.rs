@@ -30,8 +30,6 @@ fn test_initialize_gig() {
     assert_eq!(gig.freelancer, Pubkey::default());
     assert_eq!(gig.mint, env.mint.pubkey());
     assert_eq!(gig.status, GigStatus::Draft);
-    assert_eq!(gig.milestone_count, 0);
-    assert_eq!(gig.active_milestone, 0);
     assert!(gig.created_at >= clock_before && gig.created_at <= clock_after);
     assert_eq!(gig.bump, expected_bump);
 }
@@ -58,8 +56,8 @@ fn test_create_milestone() {
     assert_eq!(milestone.approved_at, 0);
     assert_eq!(milestone.bump, expected_bump);
 
-    let gig = read_gig(&env.svm, &gig_key);
-    assert_eq!(gig.milestone_count, 1);
+    let vault_state = read_vault(&env.svm, &vault_pda(&gig_key).0);
+    assert_eq!(vault_state.milestone_count, 1);
 }
 
 #[test]
@@ -345,7 +343,8 @@ fn test_cancel_before_funding() {
 
     let gig = read_gig(&env.svm, &gig_key);
     assert_eq!(gig.status, GigStatus::Cancelled);
-    assert_eq!(gig.milestone_count, 1);
+    let vault_state = read_vault(&env.svm, &vault_pda(&gig_key).0);
+    assert_eq!(vault_state.milestone_count, 1);
 }
 
 #[test]
@@ -449,11 +448,14 @@ fn test_multiple_milestones_full_approve() {
         verify_vault_invariant(&env.svm, &vault, &vault_token_key);
 
         let g = read_gig(&env.svm, &gig_key);
+        let vault_state = read_vault(&env.svm, &vault);
         if i == amounts.len() - 1 {
             assert_eq!(g.status, GigStatus::Completed);
         } else {
-            assert_eq!(g.status, GigStatus::Assigned);
-            assert_eq!(g.active_milestone, (i + 1) as u32);
+            // First funding CPIs the gig from Assigned -> InProgress; it stays InProgress
+            // until the last milestone is approved.
+            assert_eq!(g.status, GigStatus::InProgress);
+            assert_eq!(vault_state.active_milestone, (i + 1) as u32);
         }
     }
 
@@ -534,8 +536,8 @@ fn test_gig_completes_on_last_milestone() {
     .unwrap();
 
     let gig_state = read_gig(&env.svm, &gig_key);
-    assert_eq!(gig_state.status, GigStatus::Assigned);
-    assert_eq!(gig_state.active_milestone, 1);
+    assert_eq!(gig_state.status, GigStatus::InProgress);
+    assert_eq!(read_vault(&env.svm, &vault).active_milestone, 1);
 
     send(
         &mut env.svm,
@@ -556,7 +558,7 @@ fn test_gig_completes_on_last_milestone() {
 
     let gig_state = read_gig(&env.svm, &gig_key);
     assert_eq!(gig_state.status, GigStatus::Completed);
-    assert_eq!(gig_state.active_milestone, 1);
+    assert_eq!(read_vault(&env.svm, &vault).active_milestone, 2);
 
     verify_vault_invariant(&env.svm, &vault, &vault_token_key);
 }

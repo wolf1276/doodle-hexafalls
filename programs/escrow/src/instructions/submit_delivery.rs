@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
+use gig::Gig;
 
 use crate::errors::EscrowError;
 use crate::events::DeliverySubmitted;
-use crate::state::{Gig, Milestone, MilestoneStatus};
+use crate::state::{Milestone, MilestoneStatus};
 
 #[derive(Accounts)]
 pub struct SubmitDelivery<'info> {

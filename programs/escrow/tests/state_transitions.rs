@@ -440,7 +440,7 @@ fn test_create_milestone_after_gig_completed() {
     )
     .unwrap_err();
 
-    assert!(err.contains("0x1771"), "Expected InvalidStatus, got: {err}");
+    assert!(err.contains("0x177a"), "Expected GigNotFundable, got: {err}");
 }
 
 // ─────────────────────────────────────────────────────
@@ -483,7 +483,7 @@ fn test_fund_zero_amount_milestone() {
     )
     .unwrap_err();
 
-    assert!(err.contains("0x177a"), "Expected InvalidAmount, got: {err}");
+    assert!(err.contains("0x1779"), "Expected InvalidAmount, got: {err}");
 }
 
 // ─────────────────────────────────────────────────────
