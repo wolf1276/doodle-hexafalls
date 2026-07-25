@@ -3,8 +3,9 @@ use gig::{Gig, GigStatus};
 use reputation::cpi::accounts::SubmitRating;
 use reputation::UserProfile;
 
-use crate::constants::ESCROW_AUTHORITY_SEED;
+use crate::constants::{ESCROW_AUTHORITY_SEED, VAULT_SEED};
 use crate::errors::EscrowError;
+use crate::state::EscrowVault;
 
 #[derive(Accounts)]
 pub struct RateFreelancer<'info> {
@@ -16,6 +17,17 @@ pub struct RateFreelancer<'info> {
         constraint = gig.status == GigStatus::Completed @ EscrowError::InvalidStatus,
     )]
     pub gig: Account<'info, Gig>,
+
+    #[account(
+        seeds = [VAULT_SEED, gig.key().as_ref()],
+        bump = vault.bump,
+        constraint = vault.gig == gig.key() @ EscrowError::Unauthorized,
+        // A rating may only be recorded once earnings/completion have been
+        // settled with the reputation program, so a Rating PDA can never
+        // exist for a job whose UserProfile was never credited.
+        constraint = vault.reputation_synced @ EscrowError::InvalidStatus,
+    )]
+    pub vault: Account<'info, EscrowVault>,
 
     /// CHECK: only used as the seed/reference the freelancer profile is derived from.
     #[account(address = gig.freelancer @ EscrowError::Unauthorized)]

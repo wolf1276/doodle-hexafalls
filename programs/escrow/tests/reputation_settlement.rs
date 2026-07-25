@@ -196,6 +196,8 @@ fn test_rate_freelancer_records_rating_for_completed_gig() {
     let (profile, _) = reputation_profile_pda(&env.freelancer.pubkey());
     let (rating, _) = reputation_rating_pda(id);
 
+    send(&mut env.svm, &env.payer, &[ix_settle_reputation(&s.gig, &s.vault, &profile)], &[&env.payer]).unwrap();
+
     send(
         &mut env.svm,
         &env.payer,
@@ -203,6 +205,7 @@ fn test_rate_freelancer_records_rating_for_completed_gig() {
             &RateFreelancerAccounts {
                 client: env.client.pubkey(),
                 gig: s.gig,
+                vault: s.vault,
                 freelancer: env.freelancer.pubkey(),
                 freelancer_profile: profile,
                 rating,
@@ -229,7 +232,9 @@ fn test_rate_freelancer_rejects_duplicate_rating() {
     let (profile, _) = reputation_profile_pda(&env.freelancer.pubkey());
     let (rating, _) = reputation_rating_pda(id);
 
-    let acc = RateFreelancerAccounts { client: env.client.pubkey(), gig: s.gig, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
+    send(&mut env.svm, &env.payer, &[ix_settle_reputation(&s.gig, &s.vault, &profile)], &[&env.payer]).unwrap();
+
+    let acc = RateFreelancerAccounts { client: env.client.pubkey(), gig: s.gig, vault: s.vault, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
     send(&mut env.svm, &env.payer, &[ix_rate_freelancer(&acc, 5, [1u8; 32])], &[&env.payer, &env.client]).unwrap();
     env.svm.expire_blockhash();
     let result = send(&mut env.svm, &env.payer, &[ix_rate_freelancer(&acc, 1, [2u8; 32])], &[&env.payer, &env.client]);
@@ -246,7 +251,7 @@ fn test_rate_freelancer_rejects_before_completion() {
     // Gig is InProgress, not Completed -- no delivery/approval yet.
     let (profile, _) = reputation_profile_pda(&env.freelancer.pubkey());
     let (rating, _) = reputation_rating_pda(id);
-    let acc = RateFreelancerAccounts { client: env.client.pubkey(), gig: s.gig, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
+    let acc = RateFreelancerAccounts { client: env.client.pubkey(), gig: s.gig, vault: s.vault, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
     let result = send(&mut env.svm, &env.payer, &[ix_rate_freelancer(&acc, 5, [0u8; 32])], &[&env.payer, &env.client]);
     assert!(result.is_err(), "rating an incomplete gig must be rejected");
 }
@@ -263,9 +268,27 @@ fn test_rate_freelancer_rejects_wrong_client() {
 
     let (profile, _) = reputation_profile_pda(&env.freelancer.pubkey());
     let (rating, _) = reputation_rating_pda(id);
-    let acc = RateFreelancerAccounts { client: impostor.pubkey(), gig: s.gig, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
+
+    send(&mut env.svm, &env.payer, &[ix_settle_reputation(&s.gig, &s.vault, &profile)], &[&env.payer]).unwrap();
+
+    let acc = RateFreelancerAccounts { client: impostor.pubkey(), gig: s.gig, vault: s.vault, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
     let result = send(&mut env.svm, &env.payer, &[ix_rate_freelancer(&acc, 5, [0u8; 32])], &[&env.payer, &impostor]);
     assert!(result.is_err(), "only the gig's real client may submit the rating");
+}
+
+#[test]
+fn test_rate_freelancer_rejects_before_settlement() {
+    let mut env = setup();
+    let id = next_id();
+    let s = complete_gig(&mut env, id);
+    let f = env.freelancer.insecure_clone(); init_reputation_profile(&mut env, &f);
+
+    // Gig is Completed but settle_reputation was never called -- vault.reputation_synced is false.
+    let (profile, _) = reputation_profile_pda(&env.freelancer.pubkey());
+    let (rating, _) = reputation_rating_pda(id);
+    let acc = RateFreelancerAccounts { client: env.client.pubkey(), gig: s.gig, vault: s.vault, freelancer: env.freelancer.pubkey(), freelancer_profile: profile, rating };
+    let result = send(&mut env.svm, &env.payer, &[ix_rate_freelancer(&acc, 5, [0u8; 32])], &[&env.payer, &env.client]);
+    assert!(result.is_err(), "rating before reputation settlement must be rejected");
 }
 
 // ─────────────────────────────────────────────────────

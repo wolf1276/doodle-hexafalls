@@ -17,4 +17,9 @@ pub const ESCROW_AUTHORITY_SEED: &[u8] = b"escrow_authority";
 
 /// The escrow program's deployed address. Hardcoded (not a crate dependency) so the
 /// gig program can verify CPI callers without depending on the escrow crate.
+///
+/// ponytail: redeploying escrow to a new address silently breaks every
+/// escrow-only instruction here (and in `reputation`, which hardcodes the
+/// same value). Redeploy gig + reputation together whenever this changes,
+/// or move to a shared registry account if independent upgrades matter.
 pub const ESCROW_PROGRAM_ID: Pubkey = pubkey!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS");

@@ -261,6 +261,7 @@ pub fn ix_settle_reputation(gig: &Pubkey, vault: &Pubkey, freelancer_profile: &P
 pub struct RateFreelancerAccounts {
     pub client: Pubkey,
     pub gig: Pubkey,
+    pub vault: Pubkey,
     pub freelancer: Pubkey,
     pub freelancer_profile: Pubkey,
     pub rating: Pubkey,
@@ -274,6 +275,7 @@ pub fn ix_rate_freelancer(a: &RateFreelancerAccounts, score: u8, review_hash: [u
         escrow::accounts::RateFreelancer {
             client: a.client,
             gig: a.gig,
+            vault: a.vault,
             freelancer: a.freelancer,
             freelancer_profile: a.freelancer_profile,
             rating: a.rating,
