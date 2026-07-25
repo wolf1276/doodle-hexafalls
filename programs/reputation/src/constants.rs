@@ -9,10 +9,16 @@ pub const RATING_SEED: &[u8] = b"rating";
 #[constant]
 pub const BADGE_SEED: &[u8] = b"badge";
 
-/// Signer authorized to record job completions until the Escrow Program
-/// can invoke `update_completion` directly via CPI. Swapping this for a
-/// CPI-only check later does not require any account layout changes.
-pub const REPUTATION_AUTHORITY: Pubkey = pubkey!("vo18wuiY77EZa16yYKRdAjp2mj3g6GCvMHH8wkn6LAz");
+/// Seed for the escrow program's CPI-signer PDA. Only a signature derived
+/// from this seed under `ESCROW_PROGRAM_ID` is accepted as the trusted
+/// caller for settlement-triggered instructions.
+#[constant]
+pub const ESCROW_AUTHORITY_SEED: &[u8] = b"escrow_authority";
+
+/// The escrow program's deployed address. Hardcoded (not a crate dependency)
+/// so the reputation program can verify CPI callers without depending on
+/// the escrow crate.
+pub const ESCROW_PROGRAM_ID: Pubkey = pubkey!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS");
 
 pub const MIN_RATING: u8 = 1;
 pub const MAX_RATING: u8 = 5;

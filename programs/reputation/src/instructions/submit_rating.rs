@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{MAX_RATING, MIN_RATING, PROFILE_SEED, RATING_SEED, REPUTATION_AUTHORITY};
+use crate::constants::{
+    ESCROW_AUTHORITY_SEED, ESCROW_PROGRAM_ID, MAX_RATING, MIN_RATING, PROFILE_SEED, RATING_SEED,
+};
 use crate::errors::ReputationError;
 use crate::events::RatingSubmitted;
 use crate::state::{Rating, UserProfile};
@@ -13,11 +15,14 @@ pub struct SubmitRating<'info> {
     pub client: Signer<'info>,
 
     /// Trusted co-signer attesting that `job_id` is a real completed job
-    /// between `client` and `freelancer`. Hardcoded to `REPUTATION_AUTHORITY`
-    /// for the MVP; the Escrow Program will become this signer via CPI once
-    /// it can attest completions directly, with no change to account layout.
-    #[account(address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]
-    pub authority: Signer<'info>,
+    /// between `client` and `freelancer`. Callable only via CPI from escrow,
+    /// signed by its `escrow_authority` PDA -- see `UpdateCompletion`.
+    #[account(
+        seeds = [ESCROW_AUTHORITY_SEED],
+        bump,
+        seeds::program = ESCROW_PROGRAM_ID,
+    )]
+    pub escrow_authority: Signer<'info>,
 
     /// CHECK: only used as the seed/reference the freelancer profile is derived from.
     pub freelancer: UncheckedAccount<'info>,

@@ -1,19 +1,22 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{PROFILE_SEED, REPUTATION_AUTHORITY};
-use crate::errors::ReputationError;
+use crate::constants::{ESCROW_AUTHORITY_SEED, ESCROW_PROGRAM_ID, PROFILE_SEED};
 use crate::events::CompletionUpdated;
 use crate::state::UserProfile;
 use crate::utils::{checked_add, compute_reputation_score};
 
 #[derive(Accounts)]
 pub struct UpdateCompletion<'info> {
-    /// Trusted caller recording the outcome of a completed job. Hardcoded
-    /// to `REPUTATION_AUTHORITY` for the MVP; the Escrow Program will
-    /// become this signer via CPI once milestone completions call into
-    /// this instruction directly, with no change to the account layout.
-    #[account(address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]
-    pub authority: Signer<'info>,
+    /// Callable only via CPI from escrow, signed by its `escrow_authority` PDA.
+    /// A PDA has no private key, so this can never be satisfied by a direct,
+    /// top-level transaction -- only escrow's own `invoke_signed` can produce
+    /// a valid signature for it.
+    #[account(
+        seeds = [ESCROW_AUTHORITY_SEED],
+        bump,
+        seeds::program = ESCROW_PROGRAM_ID,
+    )]
+    pub escrow_authority: Signer<'info>,
 
     #[account(
         mut,

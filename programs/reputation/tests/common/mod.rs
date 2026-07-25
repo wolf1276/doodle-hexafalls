@@ -25,7 +25,6 @@ pub struct Env {
     pub payer: Keypair,
     pub client: Keypair,
     pub freelancer: Keypair,
-    pub authority: Keypair,
 }
 
 pub fn setup() -> Env {
@@ -36,18 +35,19 @@ pub fn setup() -> Env {
     let payer = Keypair::new();
     let client = Keypair::new();
     let freelancer = Keypair::new();
-    let authority_bytes: [u8; 64] = {
-        let json = include_str!("../fixtures/authority-keypair.json");
-        let parsed: Vec<u8> = serde_json::from_str(json).unwrap();
-        parsed.try_into().unwrap()
-    };
-    let authority = Keypair::try_from(&authority_bytes[..]).unwrap();
 
-    for kp in [&payer, &client, &freelancer, &authority] {
+    for kp in [&payer, &client, &freelancer] {
         svm.airdrop(&kp.pubkey(), 10_000_000_000).unwrap();
     }
 
-    Env { svm, payer, client, freelancer, authority }
+    Env { svm, payer, client, freelancer }
+}
+
+/// Escrow's own CPI-signer PDA. Reputation trusts a signature over this
+/// exact PDA (derived under the escrow program's ID) as its only caller for
+/// `update_completion` and `submit_rating` -- see `reputation::ESCROW_PROGRAM_ID`.
+pub fn escrow_authority_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"escrow_authority"], &reputation::ESCROW_PROGRAM_ID)
 }
 
 pub fn send(
@@ -158,7 +158,7 @@ pub fn ix_initialize_profile(authority: &Pubkey, profile: &Pubkey) -> Instructio
 
 pub fn ix_submit_rating(
     client: &Pubkey,
-    authority: &Pubkey,
+    escrow_authority: &Pubkey,
     freelancer: &Pubkey,
     freelancer_profile: &Pubkey,
     rating: &Pubkey,
@@ -171,7 +171,7 @@ pub fn ix_submit_rating(
         &reputation::instruction::SubmitRating { job_id, score, review_hash }.data(),
         reputation::accounts::SubmitRating {
             client: *client,
-            authority: *authority,
+            escrow_authority: *escrow_authority,
             freelancer: *freelancer,
             freelancer_profile: *freelancer_profile,
             rating: *rating,
@@ -182,7 +182,7 @@ pub fn ix_submit_rating(
 }
 
 pub fn ix_update_completion(
-    authority_pk: &Pubkey,
+    escrow_authority: &Pubkey,
     profile: &Pubkey,
     successful: bool,
     earnings: u64,
@@ -191,7 +191,7 @@ pub fn ix_update_completion(
         reputation::ID,
         &reputation::instruction::UpdateCompletion { successful, earnings }.data(),
         reputation::accounts::UpdateCompletion {
-            authority: *authority_pk,
+            escrow_authority: *escrow_authority,
             profile: *profile,
         }
         .to_account_metas(None),
@@ -199,7 +199,7 @@ pub fn ix_update_completion(
 }
 
 pub fn ix_award_badge(
-    authority_pk: &Pubkey,
+    payer: &Pubkey,
     profile: &Pubkey,
     badge: &Pubkey,
     badge_type: BadgeType,
@@ -209,7 +209,7 @@ pub fn ix_award_badge(
         reputation::ID,
         &reputation::instruction::AwardBadge { badge_type, metadata }.data(),
         reputation::accounts::AwardBadge {
-            authority: *authority_pk,
+            payer: *payer,
             profile: *profile,
             badge: *badge,
             system_program: anchor_lang::solana_program::system_program::ID,
@@ -243,21 +243,26 @@ pub fn init_profile(env: &mut Env, authority: &Keypair) -> Pubkey {
     profile
 }
 
-pub fn submit_rating_for(
+/// `update_completion` and `submit_rating` are CPI-only from escrow (see
+/// `pda_security.rs`); there is no legitimate way to drive them directly in
+/// a reputation-only test harness. These two helpers exist purely to attempt
+/// a forged direct call with an attacker-controlled keypair standing in for
+/// `escrow_authority`, so security tests can assert on the rejection.
+pub fn attempt_submit_rating_as(
     env: &mut Env,
+    forged_escrow_authority: &Keypair,
     freelancer: &Pubkey,
     job_id: u64,
     score: u8,
 ) -> Result<(), String> {
     let (profile, _) = profile_pda(freelancer);
     let (rating, _) = rating_pda(job_id);
-    let signer = env.authority.insecure_clone();
     send(
         &mut env.svm,
-        &env.payer,
+        &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &env.client.pubkey(),
-            &env.authority.pubkey(),
+            &forged_escrow_authority.pubkey(),
             freelancer,
             &profile,
             &rating,
@@ -265,87 +270,55 @@ pub fn submit_rating_for(
             score,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer, &env.client, &signer],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), forged_escrow_authority],
     )
 }
 
-pub fn submit_rating_as(
+pub fn attempt_update_completion_as(
     env: &mut Env,
-    client_key: &Keypair,
+    forged_escrow_authority: &Keypair,
     freelancer: &Pubkey,
-    job_id: u64,
-    score: u8,
-    review_hash: [u8; 32],
-) -> Result<(), String> {
-    let (profile, _) = profile_pda(freelancer);
-    let (rating, _) = rating_pda(job_id);
-    let signer = env.authority.insecure_clone();
-    send(
-        &mut env.svm,
-        &env.payer,
-        &[ix_submit_rating(
-            &client_key.pubkey(),
-            &env.authority.pubkey(),
-            freelancer,
-            &profile,
-            &rating,
-            job_id,
-            score,
-            review_hash,
-        )],
-        &[&env.payer, client_key, &signer],
-    )
-}
-
-pub fn update_completion_for(
-    env: &mut Env,
-    authority_pk: &Pubkey,
     successful: bool,
     earnings: u64,
 ) -> Result<(), String> {
-    let (profile, _) = profile_pda(authority_pk);
-    let signer = env.authority.insecure_clone();
+    let (profile, _) = profile_pda(freelancer);
     send(
         &mut env.svm,
-        &env.payer,
+        &env.payer.insecure_clone(),
         &[ix_update_completion(
-            &env.authority.pubkey(),
+            &forged_escrow_authority.pubkey(),
             &profile,
             successful,
             earnings,
         )],
-        &[&env.payer, &signer],
+        &[&env.payer.insecure_clone(), forged_escrow_authority],
     )
 }
 
+/// `award_badge` is permissionless (eligibility is recomputed from the
+/// profile's own public fields), so `env.payer` simply foots the badge
+/// account's rent.
 pub fn award_badge_for(
     env: &mut Env,
-    authority_pk: &Pubkey,
+    freelancer: &Pubkey,
     badge_type: BadgeType,
 ) -> Result<Pubkey, String> {
-    award_badge_for_with_metadata(env, authority_pk, badge_type, String::new())
+    award_badge_for_with_metadata(env, freelancer, badge_type, String::new())
 }
 
 pub fn award_badge_for_with_metadata(
     env: &mut Env,
-    authority_pk: &Pubkey,
+    freelancer: &Pubkey,
     badge_type: BadgeType,
     metadata: String,
 ) -> Result<Pubkey, String> {
-    let (profile, _) = profile_pda(authority_pk);
-    let (badge, _) = badge_pda(authority_pk, badge_type);
-    let signer = env.authority.insecure_clone();
+    let (profile, _) = profile_pda(freelancer);
+    let (badge, _) = badge_pda(freelancer, badge_type);
     send(
         &mut env.svm,
-        &env.payer,
-        &[ix_award_badge(
-            &env.authority.pubkey(),
-            &profile,
-            &badge,
-            badge_type,
-            metadata,
-        )],
-        &[&env.payer, &signer],
+        &env.payer.insecure_clone(),
+        &[ix_award_badge(&env.payer.pubkey(), &profile, &badge, badge_type, metadata)],
+        &[&env.payer.insecure_clone()],
     )?;
     Ok(badge)
 }

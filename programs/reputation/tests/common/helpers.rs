@@ -2,53 +2,6 @@ use std::fmt::Debug;
 
 use super::*;
 
-/// Creates a profile and records `n` successful completions, each with `earnings_per`.
-pub fn create_profile_with_completions(
-    env: &mut Env,
-    key: &Keypair,
-    n: u64,
-    earnings_per: u64,
-) -> Pubkey {
-    let pk = key.pubkey();
-    let profile = init_profile(env, key);
-    for _ in 0..n {
-        update_completion_for(env, &pk, true, earnings_per).unwrap();
-        env.svm.expire_blockhash();
-    }
-    profile
-}
-
-/// Creates a profile and submits the given ratings (by job_id 0..scores.len()).
-/// client in env is used as the rater.
-pub fn create_profile_with_ratings(env: &mut Env, key: &Keypair, scores: &[u8]) -> Pubkey {
-    let pk = key.pubkey();
-    let profile = init_profile(env, key);
-    for (i, &score) in scores.iter().enumerate() {
-        submit_rating_for(env, &pk, i as u64, score).unwrap();
-        env.svm.expire_blockhash();
-    }
-    profile
-}
-
-/// Creates a fully populated profile with completions, ratings, and badges.
-/// Returns (profile_key, profile_data).
-pub fn create_full_profile(
-    env: &mut Env,
-    key: &Keypair,
-) -> (Pubkey, UserProfile) {
-    let pk = key.pubkey();
-    let profile = create_profile_with_completions(env, key, 50, 1_000_000);
-    for i in 0..10u64 {
-        submit_rating_for(env, &pk, i, 5).unwrap();
-        env.svm.expire_blockhash();
-    }
-    for bt in [BadgeType::FirstGig, BadgeType::TenCompletedJobs, BadgeType::FiveStarPerformer] {
-        award_badge_for(env, &pk, bt).unwrap();
-        env.svm.expire_blockhash();
-    }
-    (profile, read_profile(&env.svm, &profile))
-}
-
 /// Verify the error string contains the given error code pattern.
 pub fn expect_error<T: Debug>(result: Result<T, String>, expected: &str, msg: &str) {
     let err = result.unwrap_err();

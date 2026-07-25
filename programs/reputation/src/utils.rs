@@ -80,10 +80,13 @@ pub fn compute_reputation_score(profile: &UserProfile) -> Result<u64> {
     Ok(score.min(MAX_REPUTATION_SCORE))
 }
 
-/// Deterministic badge eligibility. `FastDeliverer` and `TrustedFreelancer`
-/// depend on signals this program does not track on-chain (delivery
-/// timing, external endorsements) and are attested by `REPUTATION_AUTHORITY`
-/// instead; duplicate-award protection still applies to them via the PDA.
+/// Deterministic badge eligibility, checked against the profile's own public
+/// fields -- `award_badge` is permissionless, so eligibility must never
+/// depend on anything the caller could assert unverified.
+///
+/// `FastDeliverer` and `TrustedFreelancer` depend on signals this program
+/// does not track on-chain (delivery timing, external endorsements) and are
+/// not awardable yet; they return `false` until that data source exists.
 pub fn is_eligible_for_badge(profile: &UserProfile, badge_type: BadgeType) -> bool {
     match badge_type {
         BadgeType::FirstGig => profile.completed_jobs >= 1,
@@ -93,7 +96,7 @@ pub fn is_eligible_for_badge(profile: &UserProfile, badge_type: BadgeType) -> bo
             profile.rating_count >= 5 && profile.average_rating >= 500
         }
         BadgeType::TopRated => profile.rating_count >= 10 && profile.average_rating >= 450,
-        BadgeType::TrustedFreelancer | BadgeType::FastDeliverer => true,
+        BadgeType::TrustedFreelancer | BadgeType::FastDeliverer => false,
     }
 }
 

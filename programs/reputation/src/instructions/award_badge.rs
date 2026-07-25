@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{BADGE_SEED, PROFILE_SEED, REPUTATION_AUTHORITY};
+use crate::constants::{BADGE_SEED, PROFILE_SEED};
 use crate::errors::ReputationError;
 use crate::events::BadgeAwarded;
 use crate::state::{Badge, BadgeType, UserProfile};
@@ -9,8 +9,11 @@ use crate::utils::{checked_add, is_eligible_for_badge};
 #[derive(Accounts)]
 #[instruction(badge_type: BadgeType, metadata: String)]
 pub struct AwardBadge<'info> {
-    #[account(mut, address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]
-    pub authority: Signer<'info>,
+    /// Permissionless: eligibility is recomputed from the profile's own public
+    /// fields (see `is_eligible_for_badge`), so there is no privileged data to
+    /// gate here. Only pays the badge account's rent.
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
     #[account(
         mut,
@@ -21,7 +24,7 @@ pub struct AwardBadge<'info> {
 
     #[account(
         init,
-        payer = authority,
+        payer = payer,
         space = Badge::INIT_SPACE,
         seeds = [BADGE_SEED, profile.authority.as_ref(), &[badge_type.as_seed()]],
         bump,
@@ -50,7 +53,7 @@ pub fn handler(ctx: Context<AwardBadge>, badge_type: BadgeType, metadata: String
     let badge = &mut ctx.accounts.badge;
     badge.profile = ctx.accounts.profile.key();
     badge.badge_type = badge_type;
-    badge.issuer = ctx.accounts.authority.key();
+    badge.issuer = ctx.accounts.payer.key();
     badge.issued_at = now;
     badge.metadata = metadata;
     badge.bump = ctx.bumps.badge;
