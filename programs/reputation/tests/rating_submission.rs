@@ -212,6 +212,7 @@ fn test_rating_rejects_nonexistent_profile() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &env.client.pubkey(),
+            &env.authority.pubkey(),
             &no_freelancer.pubkey(),
             &profile,
             &rating,
@@ -219,7 +220,7 @@ fn test_rating_rejects_nonexistent_profile() {
             5,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     );
     assert!(result.is_err(), "rating without profile should fail");
 }

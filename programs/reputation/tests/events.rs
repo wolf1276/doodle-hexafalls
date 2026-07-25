@@ -47,6 +47,7 @@ fn test_rating_submitted_event_emitted() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &env.client.pubkey(),
+            &env.authority.pubkey(),
             &freelancer_pk,
             &profile,
             &rating,
@@ -54,7 +55,7 @@ fn test_rating_submitted_event_emitted() {
             5,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     )
     .unwrap();
 
@@ -177,6 +178,7 @@ fn test_event_contents_rating_submitted() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &env.client.pubkey(),
+            &env.authority.pubkey(),
             &freelancer_pk,
             &profile,
             &rating,
@@ -184,7 +186,7 @@ fn test_event_contents_rating_submitted() {
             4,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     )
     .unwrap();
 

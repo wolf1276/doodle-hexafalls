@@ -158,6 +158,7 @@ pub fn ix_initialize_profile(authority: &Pubkey, profile: &Pubkey) -> Instructio
 
 pub fn ix_submit_rating(
     client: &Pubkey,
+    authority: &Pubkey,
     freelancer: &Pubkey,
     freelancer_profile: &Pubkey,
     rating: &Pubkey,
@@ -170,6 +171,7 @@ pub fn ix_submit_rating(
         &reputation::instruction::SubmitRating { job_id, score, review_hash }.data(),
         reputation::accounts::SubmitRating {
             client: *client,
+            authority: *authority,
             freelancer: *freelancer,
             freelancer_profile: *freelancer_profile,
             rating: *rating,
@@ -249,11 +251,13 @@ pub fn submit_rating_for(
 ) -> Result<(), String> {
     let (profile, _) = profile_pda(freelancer);
     let (rating, _) = rating_pda(job_id);
+    let signer = env.authority.insecure_clone();
     send(
         &mut env.svm,
         &env.payer,
         &[ix_submit_rating(
             &env.client.pubkey(),
+            &env.authority.pubkey(),
             freelancer,
             &profile,
             &rating,
@@ -261,7 +265,7 @@ pub fn submit_rating_for(
             score,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer, &env.client],
+        &[&env.payer, &env.client, &signer],
     )
 }
 
@@ -275,11 +279,13 @@ pub fn submit_rating_as(
 ) -> Result<(), String> {
     let (profile, _) = profile_pda(freelancer);
     let (rating, _) = rating_pda(job_id);
+    let signer = env.authority.insecure_clone();
     send(
         &mut env.svm,
         &env.payer,
         &[ix_submit_rating(
             &client_key.pubkey(),
+            &env.authority.pubkey(),
             freelancer,
             &profile,
             &rating,
@@ -287,7 +293,7 @@ pub fn submit_rating_as(
             score,
             review_hash,
         )],
-        &[&env.payer, client_key],
+        &[&env.payer, client_key, &signer],
     )
 }
 

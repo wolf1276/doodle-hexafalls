@@ -34,6 +34,7 @@ fn test_self_dealing_check_not_bypassed() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &freelancer_pk,
+            &env.authority.pubkey(),
             &freelancer_pk,
             &profile,
             &rating,
@@ -41,7 +42,7 @@ fn test_self_dealing_check_not_bypassed() {
             5,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &freelancer],
+        &[&env.payer.insecure_clone(), &freelancer, &env.authority.insecure_clone()],
     );
     expect_send_error(result.unwrap_err(), ERR_SELF_DEALING, "explicit self-dealing");
 }

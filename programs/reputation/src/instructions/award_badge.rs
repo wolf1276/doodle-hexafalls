@@ -56,7 +56,8 @@ pub fn handler(ctx: Context<AwardBadge>, badge_type: BadgeType, metadata: String
     badge.bump = ctx.bumps.badge;
 
     let profile = &mut ctx.accounts.profile;
-    profile.badges_earned = checked_add(profile.badges_earned as u64, 1)? as u32;
+    profile.badges_earned = u32::try_from(checked_add(profile.badges_earned as u64, 1)?)
+        .map_err(|_| ReputationError::MathOverflow)?;
     profile.updated_at = now;
 
     emit!(BadgeAwarded {

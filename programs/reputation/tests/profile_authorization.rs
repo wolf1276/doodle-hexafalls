@@ -113,6 +113,7 @@ fn test_submit_rating_rejects_self_dealing() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &freelancer.pubkey(),
+            &env.authority.pubkey(),
             &freelancer.pubkey(),
             &profile,
             &rating,
@@ -120,7 +121,7 @@ fn test_submit_rating_rejects_self_dealing() {
             5,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &freelancer],
+        &[&env.payer.insecure_clone(), &freelancer, &env.authority.insecure_clone()],
     );
     expect_send_error(result.unwrap_err(), ERR_SELF_DEALING, "self-dealing rating should fail");
 }
@@ -139,6 +140,35 @@ fn test_submit_rating_allows_different_client() {
     let rating = read_rating(&env.svm, &rating_key);
     assert_eq!(rating.client, client.pubkey());
     assert_ne!(rating.client, freelancer.pubkey());
+}
+
+#[test]
+fn test_submit_rating_rejects_unauthorized_co_signer() {
+    let mut env = setup();
+    let freelancer = env.freelancer.insecure_clone();
+    init_profile(&mut env, &freelancer);
+
+    let impostor = solana_keypair::Keypair::new();
+    env.svm.airdrop(&impostor.pubkey(), 10_000_000_000).unwrap();
+
+    let (profile, _) = profile_pda(&freelancer.pubkey());
+    let (rating, _) = rating_pda(1);
+    let result = send(
+        &mut env.svm,
+        &env.payer.insecure_clone(),
+        &[ix_submit_rating(
+            &env.client.pubkey(),
+            &impostor.pubkey(),
+            &freelancer.pubkey(),
+            &profile,
+            &rating,
+            1,
+            5,
+            DEFAULT_REVIEW_HASH,
+        )],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &impostor],
+    );
+    expect_send_error(result.unwrap_err(), ERR_UNAUTHORIZED, "forged rating without authority co-sign should fail");
 }
 
 #[test]
@@ -171,6 +201,7 @@ fn test_submit_rating_rejects_freelancer_without_profile() {
         &env.payer.insecure_clone(),
         &[ix_submit_rating(
             &env.client.pubkey(),
+            &env.authority.pubkey(),
             &no_profile.pubkey(),
             &profile,
             &rating,
@@ -178,7 +209,7 @@ fn test_submit_rating_rejects_freelancer_without_profile() {
             5,
             DEFAULT_REVIEW_HASH,
         )],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     );
     assert!(
         result.is_err(),

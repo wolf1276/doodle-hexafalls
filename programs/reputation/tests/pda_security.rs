@@ -58,6 +58,7 @@ fn test_profile_pda_cannot_be_spoofed_with_wrong_seed() {
         .data(),
         reputation::accounts::SubmitRating {
             client: env.client.pubkey(),
+            authority: env.authority.pubkey(),
             freelancer: real_authority.pubkey(),
             freelancer_profile: fake_profile.pubkey(),
             rating,
@@ -70,7 +71,7 @@ fn test_profile_pda_cannot_be_spoofed_with_wrong_seed() {
         &mut env.svm,
         &env.payer.insecure_clone(),
         &[ix],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     );
     assert!(result.is_err(), "fake profile PDA should fail");
 }
@@ -138,6 +139,7 @@ fn test_fake_rating_pda_rejected() {
         .data(),
         reputation::accounts::SubmitRating {
             client: env.client.pubkey(),
+            authority: env.authority.pubkey(),
             freelancer: freelancer_pk,
             freelancer_profile: profile,
             rating: fake_rating.pubkey(),
@@ -150,7 +152,7 @@ fn test_fake_rating_pda_rejected() {
         &mut env.svm,
         &env.payer.insecure_clone(),
         &[ix],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     );
     assert!(result.is_err(), "fake rating PDA should fail");
 }
@@ -215,6 +217,7 @@ fn test_wrong_owner_account_rejected() {
         .data(),
         reputation::accounts::SubmitRating {
             client: env.client.pubkey(),
+            authority: env.authority.pubkey(),
             freelancer: pk,
             freelancer_profile: system_account.pubkey(),
             rating: rating_key,
@@ -227,7 +230,7 @@ fn test_wrong_owner_account_rejected() {
         &mut env.svm,
         &env.payer.insecure_clone(),
         &[ix],
-        &[&env.payer.insecure_clone(), &env.client.insecure_clone()],
+        &[&env.payer.insecure_clone(), &env.client.insecure_clone(), &env.authority.insecure_clone()],
     );
     assert!(result.is_err(), "system-owned account should not pass as profile");
 }
