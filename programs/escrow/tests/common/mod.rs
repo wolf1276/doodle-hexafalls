@@ -2,7 +2,7 @@
 
 use anchor_lang::{
     solana_program::{instruction::Instruction, program_pack::Pack, system_instruction},
-    InstructionData, ToAccountMetas,
+    AccountDeserialize, InstructionData, ToAccountMetas,
 };
 use litesvm::LiteSVM;
 use solana_clock::Clock;
@@ -13,7 +13,11 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use spl_token_interface as spl_token;
 
+pub use escrow::state::*;
+pub use escrow::errors::EscrowError;
+
 pub const USDC_DECIMALS: u8 = 6;
+pub const STANDARD_AMOUNT: u64 = 1_000_000;
 
 pub struct Env {
     pub svm: LiteSVM,
@@ -39,13 +43,7 @@ pub fn setup() -> Env {
 
     create_mint(&mut svm, &payer, &mint, USDC_DECIMALS);
 
-    Env {
-        svm,
-        payer,
-        client,
-        freelancer,
-        mint,
-    }
+    Env { svm, payer, client, freelancer, mint }
 }
 
 pub fn send(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<(), String> {
@@ -59,6 +57,20 @@ pub fn send(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[
     }
     let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
     svm.send_transaction(tx).map(|_| ()).map_err(|e| e.err.to_string())
+}
+
+pub fn send_logs(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<Vec<String>, String> {
+    let blockhash = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(ixs, Some(&payer.pubkey()), &blockhash);
+    let mut all_signers = vec![payer];
+    for s in signers {
+        if s.pubkey() != payer.pubkey() {
+            all_signers.push(s);
+        }
+    }
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
+    let meta = svm.send_transaction(tx).map_err(|e| e.err.to_string())?;
+    Ok(meta.logs)
 }
 
 pub fn create_mint(svm: &mut LiteSVM, payer: &Keypair, mint: &Keypair, decimals: u8) {
@@ -121,6 +133,40 @@ pub fn warp_seconds(svm: &mut LiteSVM, seconds: i64) {
     svm.set_sysvar::<Clock>(&clock);
 }
 
+// ── Account deserialization ──
+
+pub fn read_gig(svm: &LiteSVM, key: &Pubkey) -> Gig {
+    let data = svm.get_account(key).unwrap().data;
+    Gig::try_deserialize(&mut &data[..]).unwrap()
+}
+
+pub fn read_milestone(svm: &LiteSVM, key: &Pubkey) -> Milestone {
+    let data = svm.get_account(key).unwrap().data;
+    Milestone::try_deserialize(&mut &data[..]).unwrap()
+}
+
+pub fn read_vault(svm: &LiteSVM, key: &Pubkey) -> EscrowVault {
+    let data = svm.get_account(key).unwrap().data;
+    EscrowVault::try_deserialize(&mut &data[..]).unwrap()
+}
+
+// ── Accounting invariants ──
+
+pub fn verify_vault_invariant(svm: &LiteSVM, vault_key: &Pubkey, vault_token_key: &Pubkey) {
+    let vault = read_vault(svm, vault_key);
+    let vault_balance = token_balance(svm, vault_token_key);
+    assert_eq!(
+        vault.total_locked,
+        vault.total_released + vault_balance,
+        "vault accounting invariant violated: locked {} != released {} + balance {}",
+        vault.total_locked,
+        vault.total_released,
+        vault_balance,
+    );
+}
+
+// ── PDA derivation ──
+
 pub fn gig_pda(id: u64) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"gig", id.to_le_bytes().as_ref()], &escrow::ID)
 }
@@ -136,6 +182,8 @@ pub fn vault_pda(gig: &Pubkey) -> (Pubkey, u8) {
 pub fn vault_token_pda(gig: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault", gig.as_ref(), b"token"], &escrow::ID)
 }
+
+// ── Instruction builders ──
 
 pub fn ix_initialize_gig(
     client: &Pubkey,
@@ -298,4 +346,90 @@ pub fn ix_cancel_before_funding(client: &Pubkey, gig: &Pubkey, milestone: &Pubke
         }
         .to_account_metas(None),
     )
+}
+
+// ── Test harness: initialize + create milestone + token accounts ──
+
+pub struct SetupAccounts {
+    pub gig: Pubkey,
+    pub milestone: Pubkey,
+    pub vault: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub client_token_account: Pubkey,
+    pub freelancer_token_account: Pubkey,
+}
+
+pub fn init_gig(env: &mut Env, gig_id: u64) -> Pubkey {
+    let (gig, _) = gig_pda(gig_id);
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_initialize_gig(
+            &env.client.pubkey(),
+            &env.freelancer.pubkey(),
+            &env.mint.pubkey(),
+            &gig,
+            gig_id,
+        )],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+    gig
+}
+
+pub fn create_milestone_for(env: &mut Env, gig: &Pubkey, index: u32, amount: u64) -> Pubkey {
+    let (milestone, _) = milestone_pda(gig, index);
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_create_milestone(&env.client.pubkey(), gig, &milestone, amount)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+    milestone
+}
+
+pub fn create_funded_milestone(env: &mut Env, gig_id: u64, amount: u64) -> SetupAccounts {
+    let gig = init_gig(env, gig_id);
+    let milestone = create_milestone_for(env, &gig, 0, amount);
+
+    let (vault, _) = vault_pda(&gig);
+    let (vault_token_account, _) = vault_token_pda(&gig);
+    let client_token_account = create_token_account(&mut env.svm, &env.payer, &env.mint.pubkey(), &env.client.pubkey());
+    let freelancer_token_account =
+        create_token_account(&mut env.svm, &env.payer, &env.mint.pubkey(), &env.freelancer.pubkey());
+
+    mint_to(
+        &mut env.svm,
+        &env.payer,
+        &env.mint.pubkey(),
+        &env.payer,
+        &client_token_account,
+        amount,
+    );
+
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_fund_milestone(&FundAccounts {
+            client: env.client.pubkey(),
+            gig,
+            milestone,
+            vault,
+            vault_token_account,
+            client_token_account,
+            mint: env.mint.pubkey(),
+        })],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+
+    SetupAccounts {
+        gig,
+        milestone,
+        vault,
+        vault_token_account,
+        client_token_account,
+        freelancer_token_account,
+    }
 }
