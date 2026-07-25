@@ -1,31 +1,33 @@
-# Escrow & Reputation Programs — Security
+# Gig, Escrow & Reputation Programs — Security
 
-**Audit status: internal audit complete for both programs. No external audit has been performed, and neither program is deployed.** The Escrow program (`programs/escrow`) and the Reputation program (`programs/reputation`) have each completed implementation, a full internal security audit, and their own regression/security test suite — 184 tests (Escrow) and 144 tests (Reputation) — covering every invariant documented below. No open findings in either program.
+**Audit status: internal audit complete for all three programs. No external audit has been performed, and none are deployed.** The Gig program (`programs/gig`), the Escrow program (`programs/escrow`), and the Reputation program (`programs/reputation`) have each completed implementation, a full internal security audit, and their own regression/security test suite. No open findings in any program.
 
-Scope of this document: `programs/escrow` (§1–14) and `programs/reputation` (§15–26). The Dispute program (`programs/dispute`, unimplemented) is out of scope and tracked separately.
+Scope of this document: `programs/gig` + `programs/escrow` — treated together, since they cooperate through CPI (§1–14) — and `programs/reputation` (§15–26). The Dispute program (`programs/dispute`, unimplemented) is out of scope and tracked separately.
 
 ## 1. Threat Model
 
 Actors:
 
-- **Client** — funds milestones, approves releases. Trusted to sign only their own transactions; **not** trusted to act honestly (may go silent, may attempt to re-fund, may attempt to reference someone else's milestone).
+- **Client** — funds milestones, approves releases, manages gig listings. Trusted to sign only their own transactions; **not** trusted to act honestly (may go silent, may attempt to re-fund, may attempt to reference someone else's milestone).
 - **Freelancer** — submits delivery. Trusted to sign only their own transactions; **not** trusted to fabricate submissions for gigs they aren't party to.
 - **Permissionless caller** — anyone, for `partial_timeout_release` / `full_timeout_release`. Must not be able to extract more than the fixed percentage, regardless of who calls it or how many times.
 - **Adversarial transaction builder** — may supply arbitrary accounts to any instruction, including accounts that are the right *type* but the wrong *instance* (e.g. a vault from a different gig), or accounts that are uninitialized/attacker-owned, attempting to spoof a PDA.
+- **A malicious or buggy third program** — may attempt to call Gig's CPI-only instructions (`mark_in_progress`, `mark_completed_by_escrow`, `mark_cancelled_by_escrow`) directly, without going through Escrow, to force an unauthorized `GigStatus` transition. Must not be able to produce a valid `escrow_authority` signature (§4a).
 
-Assets at risk: SPL tokens held in vault token accounts. The program's job is to guarantee those tokens can only leave a vault via the three defined release paths, in the defined amounts, to the defined recipient.
+Assets at risk: SPL tokens held in vault token accounts, and the integrity of `GigStatus` transitions that gate them. The programs' job is to guarantee tokens can only leave a vault via the three defined release paths, in the defined amounts, to the defined recipient — and that a `Gig`'s status can only be advanced by the party (client, or Escrow via CPI) actually authorized to advance it.
 
 ## 2. Signer Validation
 
 Every instruction that changes ownership-sensitive state requires the correct `Signer<'info>`:
 
-- `initialize_gig` — `client` must sign and becomes `gig.client`; `gig.freelancer` starts as `Pubkey::default()`.
-- `update_gig` / `publish_gig` / `assign_freelancer` / `complete_gig` / `archive_gig` / `cancel_gig` — `client` must sign, checked against `gig.client` via `has_one = client`. `assign_freelancer` additionally enforces `require_keys_neq!(client, freelancer)`, so a client cannot assign themselves and become both parties, and rejects reassignment once `gig.freelancer` is set (`FreelancerAlreadyAssigned`).
-- `create_milestone` / `fund_milestone` / `approve_milestone` / `cancel_before_funding` — `client` must sign, and is additionally checked against `gig.client` via `has_one = client`.
-- `submit_delivery` — `freelancer` must sign, checked against `gig.freelancer` via `has_one = freelancer`.
-- `partial_timeout_release` / `full_timeout_release` — **intentionally permissionless** (no signer requirement beyond fee-payer). This is a deliberate design choice (§ "Timeout Security" below), not a missing check.
+- `initialize_gig` (Gig) — `client` must sign and becomes `gig.client`; `gig.freelancer` starts as `Pubkey::default()`.
+- `update_gig` / `publish_gig` / `assign_freelancer` / `complete_gig` / `archive_gig` / `cancel_gig` (Gig) — `client` must sign, checked against `gig.client` via `has_one = client`. `assign_freelancer` additionally enforces `require_keys_neq!(client, freelancer)`, so a client cannot assign themselves and become both parties, and rejects reassignment once `gig.freelancer` is set (`FreelancerAlreadyAssigned`).
+- `create_milestone` / `fund_milestone` / `approve_milestone` / `cancel_before_funding` (Escrow) — `client` must sign, and is additionally checked against `gig.client` via `has_one = client`.
+- `submit_delivery` (Escrow) — `freelancer` must sign, checked against `gig.freelancer` via `has_one = freelancer`.
+- `partial_timeout_release` / `full_timeout_release` (Escrow) — **intentionally permissionless** (no signer requirement beyond fee-payer). This is a deliberate design choice (§12, "Timeout Security"), not a missing check.
+- `mark_in_progress` / `mark_completed_by_escrow` / `mark_cancelled_by_escrow` (Gig) — **CPI-only.** No client or freelancer signature is accepted here at all; the sole accepted signer is the `escrow_authority` PDA, and only Escrow can produce a valid signature for it (§4a).
 
-`tests/authorization.rs` (15 tests) asserts every signer-gated instruction rejects the wrong signer; `tests/lifecycle.rs` (15 tests) and `tests/freelancer_assignment.rs` (8 tests) cover the gig-lifecycle authority and precondition rules.
+Each program's own `tests/authorization.rs`-equivalent asserts every signer-gated instruction rejects the wrong signer; the gig-lifecycle authority and precondition rules are covered in Gig's own lifecycle/assignment tests, and the cross-program integration suite additionally asserts the CPI-only instructions reject a direct, non-Escrow caller.
 
 ## 3. Ownership & Account-Type Validation
 
@@ -40,7 +42,25 @@ Full design rationale in [ARCHITECTURE.md § PDA Architecture](./ARCHITECTURE.md
 - **PDA spoofing protection**: an attacker cannot pass an account they control and claim it is "the vault" or "the milestone" for a given gig — the derived address would not match, and Anchor's constraint check fails the transaction before any state mutation or token transfer occurs.
 - **Vault ownership guarantees**: the vault token account's SPL `authority` is set to the `EscrowVault` PDA at creation (`token::authority = vault`) and never reassigned. Because that PDA has no private key, only this program (via `invoke_signed` with the correct seeds) can ever authorize a debit.
 
-Verified by `tests/pda_security.rs` (13 tests): wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault/token-account mismatch, cross-gig vault substitution in `approve_milestone`, and spoofed-but-uninitialized PDAs are all rejected.
+Verified by each program's `tests/pda_security.rs`: wrong gig PDA, wrong milestone PDA, wrong vault PDA, wrong bump, milestone-from-a-different-gig, vault/token-account mismatch, cross-gig vault substitution in `approve_milestone`, and spoofed-but-uninitialized PDAs are all rejected.
+
+## 4a. Cross-Program CPI Authorization (Escrow → Gig)
+
+This is the trust boundary unique to the split protocol, and gets its own subsection because it is the one place a bug would let a party bypass Gig's own status rules entirely.
+
+- **The mechanism.** `mark_in_progress`, `mark_completed_by_escrow`, and `mark_cancelled_by_escrow` each require an `escrow_authority: Signer<'info>` constrained by `seeds = [ESCROW_AUTHORITY_SEED], bump, seeds::program = ESCROW_PROGRAM_ID`. `ESCROW_PROGRAM_ID` is a hardcoded `Pubkey` constant in `programs/gig/src/constants.rs`, equal to Escrow's own `declare_id!`. This is **not** a crate dependency from Gig on Escrow — just a literal pubkey — so the one-way CPI direction (§5.3–5.4 in ARCHITECTURE.md) is preserved even in the dependency graph.
+- **Why it can't be forged.** The Solana runtime enforces that a PDA signature derived under `seeds::program = X` can only be produced by program `X` itself calling `invoke_signed`. No other program — not even Gig itself, not a copy-pasted lookalike program, not an EOA with a lucky keypair (PDAs are off-curve; no keypair exists for them at all) — can ever construct a valid signature for `[b"escrow_authority"]` under Escrow's program ID. This is verified directly: calling any of the three CPI-only instructions as a top-level transaction instruction (not via CPI from Escrow), or via CPI from a different program, fails at the `seeds::program` constraint check before the handler body runs.
+- **Status preconditions are re-checked on the Gig side, not trusted from the caller.** Each instruction still independently requires the correct starting `GigStatus` (`mark_in_progress` requires `Assigned`; `mark_completed_by_escrow` requires `InProgress`; `mark_cancelled_by_escrow` requires `Assigned` or `InProgress`). Escrow proposes a transition by successfully producing the signature; Gig is still the sole authority on whether that transition is legal. A bug in Escrow that tried to call `mark_completed_by_escrow` on a `Draft` gig (which should never happen given Escrow's own preconditions, but is not *assumed* safe) would still be rejected here.
+- **One-way only.** Gig never CPIs into Escrow. There is no code path in `programs/gig` that references Escrow's program ID except this one read-only comparison, and no code path that constructs a CPI into it.
+
+## 4b. Cross-Program CPI Authorization (Escrow → Reputation)
+
+The same mechanism as §4a, applied to the second CPI edge in the protocol.
+
+- **The mechanism.** Reputation's `update_completion` and `submit_rating` each require an `escrow_authority: Signer<'info>` constrained by `seeds = [ESCROW_AUTHORITY_SEED], bump, seeds::program = ESCROW_PROGRAM_ID`, where `ESCROW_PROGRAM_ID` is a hardcoded `Pubkey` constant in `programs/reputation/src/constants.rs` (again a literal, not a crate dependency on `escrow`, keeping the CPI direction one-way in the dependency graph too).
+- **Why it can't be forged.** Identical argument to §4a: a PDA signature under `seeds::program = ESCROW_PROGRAM_ID` can only ever be produced by the Escrow program itself via `invoke_signed`. A direct top-level call, a call "signed" by a real attacker keypair, or a call routed through any other program all fail the `seeds`/`seeds::program` constraint before the handler runs. Verified directly in `programs/reputation/tests/pda_security.rs` (`test_update_completion_rejects_non_pda_signer`, `test_submit_rating_rejects_non_pda_signer`) and end-to-end in `programs/escrow/tests/reputation_settlement.rs` (`test_direct_reputation_update_completion_by_non_escrow_signer_rejected`).
+- **Settlement preconditions are re-checked on the Escrow side, not merely asserted by convention.** `settle_reputation` independently requires `vault.milestone_count > 0 && vault.active_milestone >= vault.milestone_count` (every milestone actually released) and `!vault.reputation_synced` (never fired before for this gig); `rate_freelancer` independently requires `gig.status == GigStatus::Completed` and `has_one = client`. Reputation does not re-derive any of this — it trusts the signature as proof the call came from Escrow's own executing code, and trusts Escrow to have gated *when* it fires.
+- **One-way only, and additive rather than embedded.** Reputation never CPIs into Escrow. Unlike the Gig CPI (invoked inline from `approve_milestone`/`full_timeout_release`'s last-milestone branch), the Reputation CPI is issued from two dedicated, separately-callable Escrow instructions (`settle_reputation`, `rate_freelancer`) rather than being folded into the settlement instructions themselves — so a gig whose freelancer never created a reputation profile still settles normally; reputation notification is an optional, permissionless follow-up rather than a hard dependency of payment release.
 
 ## 5. Reinitialization & Replay Protection
 
@@ -61,23 +81,26 @@ Verified by `tests/pda_security.rs` (13 tests): wrong gig PDA, wrong milestone P
 | `full_timeout_release` | `PartialReleased` | `InvalidStatus` |
 | `cancel_before_funding` | `PendingFunding` | `AlreadyFunded` |
 
-This ordering also enforces the intended timeout sequencing: `full_timeout_release` cannot fire before `partial_timeout_release` has already moved the milestone to `PartialReleased`, since that's its required precondition. `tests/state_transitions.rs` (18 tests) exhaustively exercises every valid and invalid transition.
+This ordering also enforces the intended timeout sequencing: `full_timeout_release` cannot fire before `partial_timeout_release` has already moved the milestone to `PartialReleased`, since that's its required precondition. Each program's `tests/state_transitions.rs`-equivalent exhaustively exercises every valid and invalid transition.
 
-`GigStatus` (`Draft → Published → Assigned → Completed → Archived`, with `Cancelled` reachable from any of the first three) is likewise checked as an account constraint on every gig-lifecycle instruction:
+`GigStatus` (`Draft → Published → Assigned → InProgress → Completed → Archived`, with `Cancelled` reachable from `Draft`/`Published`/`Assigned` directly, or from `Assigned`/`InProgress` via Escrow's CPI) is likewise checked as an account constraint on every instruction that touches it — both Gig's own client-facing instructions and Escrow's CPI calls:
 
-| Instruction | Required starting status | Error on mismatch |
-|---|---|---|
-| `update_gig` | `Draft` | `NotDraftStatus` |
-| `publish_gig` | `Draft` | `NotDraftStatus` |
-| `assign_freelancer` | `Published` | `NotPublishedStatus` |
-| `create_milestone` | `Assigned` | `InvalidStatus` |
-| `complete_gig` | `Assigned` | `NotAssignedStatus` |
-| `archive_gig` | `Completed` | `NotCompletedStatus` |
-| `cancel_gig` | `Draft`, `Published`, or `Assigned` | `InvalidStatus` |
+| Instruction | Program | Required starting status | Error on mismatch |
+|---|---|---|---|
+| `update_gig` | Gig | `Draft` | `NotDraftStatus` |
+| `publish_gig` | Gig | `Draft` | `NotDraftStatus` |
+| `assign_freelancer` | Gig | `Published` | `NotPublishedStatus` |
+| `complete_gig` | Gig | `Assigned` | `NotAssignedStatus` |
+| `archive_gig` | Gig | `Completed` | `NotCompletedStatus` |
+| `cancel_gig` | Gig | `Draft`, `Published`, or `Assigned` | `InvalidStatus` |
+| `create_milestone` / `fund_milestone` | Escrow | `Assigned` or `InProgress` | `GigNotFundable` |
+| `mark_in_progress` (CPI) | Gig | `Assigned` | `NotAssignedStatus` |
+| `mark_completed_by_escrow` (CPI) | Gig | `InProgress` | `NotInProgressStatus` |
+| `mark_cancelled_by_escrow` (CPI) | Gig | `Assigned` or `InProgress` | `InvalidStatus` |
 
-`create_milestone` requiring `Assigned` is what prevents new milestones on a draft, unpublished, cancelled, completed, or archived gig — and guarantees `gig.freelancer` is set before any money can be escrowed against the gig. `tests/lifecycle.rs` (15 tests) exercises every legal and illegal gig transition.
+`create_milestone`/`fund_milestone` requiring `Assigned`/`InProgress` is what prevents new milestones or funding on a draft, unpublished, cancelled, completed, or archived gig — and guarantees `gig.freelancer` is set before any money can be escrowed against the gig. Each program's own lifecycle tests, plus the cross-program integration suite, exercise every legal and illegal gig transition, including transitions attempted through the wrong program (e.g. trying to fund a `Draft` gig, or trying to `cancel_gig` an `InProgress` one — both rejected).
 
-Note that these gig-status checks are listing hygiene, not custody controls: no `GigStatus` value can release, redirect, or refund funds already locked in a milestone. Cancelling a gig does not touch a funded milestone's vault balance — that milestone still settles only through approval or the timeout path.
+Note that Gig's client-facing status checks are listing hygiene, not custody controls: no `GigStatus` value can release, redirect, or refund funds already locked in a milestone. Cancelling a gig (whether client-initiated pre-funding, or Escrow-initiated via `mark_cancelled_by_escrow`) does not touch a funded milestone's vault balance — that milestone still settles only through approval or the timeout path.
 
 ## 7. Checked Arithmetic — Overflow & Underflow Protection
 
@@ -87,7 +110,7 @@ All balance/counter math routes through `programs/escrow/src/utils.rs`, never ra
 - `checked_sub(a, b)` → `EscrowError::MathError` on underflow.
 - `percent_of(amount, percent)` promotes to `u128` before multiplying, so `amount * percent` cannot overflow `u64` even at `amount = u64::MAX`, then checks the `u128 → u64` downcast explicitly.
 
-Every counter that money flows through — `Gig.milestone_count`/`active_milestone`, `EscrowVault.total_locked`/`total_released`, `Milestone.released` — is updated exclusively through these helpers. The release path always computes the remaining payable amount as `checked_sub(milestone.amount, milestone.released)` and requires it to be `> 0` (`InsufficientFunds`), so a milestone can never pay out more than `milestone.amount` in total even across a partial + full release pair. `tests/arithmetic.rs` (7 tests, plus 4 unit tests in `utils.rs`) covers overflow, underflow, and percentage-split edge cases including `u64::MAX`.
+Every counter that money flows through — `EscrowVault.milestone_count`/`active_milestone`/`total_locked`/`total_released`, `Milestone.released` — is updated exclusively through these helpers. (These counters live on `EscrowVault`, not `Gig` — see ARCHITECTURE.md §4.1 — precisely so Gig's own account never needs escrow-specific arithmetic at all.) The release path always computes the remaining payable amount as `checked_sub(milestone.amount, milestone.released)` and requires it to be `> 0` (`InsufficientFunds`), so a milestone can never pay out more than `milestone.amount` in total even across a partial + full release pair. `tests/arithmetic.rs` (7 tests, plus 4 unit tests in `utils.rs`) covers overflow, underflow, and percentage-split edge cases including `u64::MAX`.
 
 ## 8. Token Mint Validation
 
@@ -127,7 +150,12 @@ Double-spending is prevented by the composition of §6 (state transitions) and �
 
 ## 13. CPI Safety
 
-The program makes exactly one class of outbound CPI: `anchor_spl::token::transfer_checked` into the SPL Token program, always with an explicit, hardcoded `token_program` account typed as `Program<'info, Token>` (Anchor validates this is the genuine SPL Token program, not an attacker-supplied lookalike). Outbound vault transfers are signed via `CpiContext::new_with_signer` using seeds derived from the account's own stored `bump` (see [ARCHITECTURE.md § 8.3](./ARCHITECTURE.md#83-bump-seeds-and-program-signing)), never a caller-supplied bump. The program never CPIs into an arbitrary/caller-specified program ID, eliminating an entire class of CPI-confusion attacks.
+Escrow makes two classes of outbound CPI, both signed with program-derived (never caller-supplied) seeds:
+
+- `anchor_spl::token::transfer_checked` into the SPL Token program, always with an explicit, hardcoded `token_program` account typed as `Program<'info, Token>` (Anchor validates this is the genuine SPL Token program, not an attacker-supplied lookalike). Signed via `CpiContext::new_with_signer` using seeds derived from `EscrowVault`'s own stored `bump` (see [ARCHITECTURE.md § 8.3](./ARCHITECTURE.md#83-bump-seeds-and-program-signing)).
+- `gig::cpi::{mark_in_progress, mark_completed_by_escrow, mark_cancelled_by_escrow}` into the Gig program, always with an explicit `gig_program: Program<'info, gig::program::Gig>` account (Anchor validates this is the genuine, declared Gig program, not a caller-supplied lookalike — a fake "gig" program deployed by an attacker at a different address would fail this type check). Signed via `CpiContext::new_with_signer` using seeds derived from `ctx.bumps.escrow_authority`, i.e. the bump Anchor itself just verified when validating the `escrow_authority` account constraint in the same instruction — never a caller-supplied bump (§4a).
+
+Neither program ever CPIs into an arbitrary/caller-specified program ID — both program targets (`Token`, `gig::program::Gig`) are fixed Rust types Anchor checks against their genuine declared addresses, eliminating CPI-confusion attacks. Gig makes zero outbound CPIs of any kind; the CPI relationship is strictly one-directional (§5.3 in ARCHITECTURE.md).
 
 ## 14. Summary of Enforced Invariants
 
@@ -141,39 +169,46 @@ The program makes exactly one class of outbound CPI: `anchor_spl::token::transfe
 8. Timeout releases cannot fire before their exact deadline, but are permissionless once eligible.
 9. All arithmetic on balances/counters is checked; overflow/underflow abort the transaction.
 10. Every PDA used by any instruction is re-derived and validated against its logical parent, blocking substitution/spoofing.
+11. `Gig.status` can only be advanced by (a) the client, through Gig's own client-facing instructions, or (b) Escrow, exclusively through the three CPI-only instructions, exclusively via a signature the Solana runtime guarantees only Escrow can produce.
+12. Escrow never writes `Gig` fields directly — every escrow-triggered `GigStatus` transition executes inside the Gig program's own instruction handler, which independently re-validates the precondition before applying it.
 
 ---
 
 # Reputation Program — Security
 
-**Audit status: Complete.** The Reputation program (`programs/reputation`) has completed implementation, a full internal security audit, and a 144-test regression/security suite (`cargo test -p reputation`, `programs/reputation/tests/`) covering every invariant documented below. No open findings.
+**Audit status: Complete.** The Reputation program (`programs/reputation`) has completed implementation, a full internal security audit, and a regression/security suite (`cargo test -p reputation`, `programs/reputation/tests/`) covering every invariant documented below, plus a dedicated cross-program CPI suite (`cargo test -p escrow --test reputation_settlement`) exercising the real Escrow → Reputation call path end-to-end. No open findings.
 
 ## 15. Threat Model
 
 Actors:
 
 - **Profile authority** — the user a `UserProfile` belongs to. Signs `initialize_profile` only. Trusted to sign only their own transactions.
-- **Client** — signs `submit_rating` for a job they claim to have commissioned. Trusted to sign only their own transactions; **not** trusted to submit an honest score, or to necessarily be the real client of the referenced job (§15.4, Trust Assumptions).
-- **`REPUTATION_AUTHORITY`** — a single hardcoded pubkey, the only signer accepted for `update_completion` and `award_badge`. Fully trusted for the correctness of completion/earnings data and badge issuance in the current (pre-CPI) design; see §18 in ARCHITECTURE.md.
-- **Adversarial transaction builder** — may supply arbitrary accounts to any instruction, including the right account *type* at the wrong *instance* (e.g. someone else's profile), or uninitialized/attacker-owned accounts, attempting to spoof a PDA.
+- **Client** — signs `submit_rating` (via Escrow's `rate_freelancer`) for a job they claim to have commissioned. Trusted to sign only their own transactions; escrow's `has_one = client` check on the `Gig` account (not this program) is what actually ties the signer to the real client of that job.
+- **Escrow's `escrow_authority` PDA** — the only signer ever accepted for `update_completion` and `submit_rating`. Not a keypair-held trust bottleneck: it is a PDA derived from `ESCROW_AUTHORITY_SEED` under `ESCROW_PROGRAM_ID`, so the only way to produce a valid signature for it is `invoke_signed` from inside the Escrow program itself (§15.5). Reputation trusts Escrow's own settlement logic (vault fully released, gig `Completed`) for *when* this CPI fires; it does not re-verify escrow's internal state.
+- **Adversarial transaction builder** — may supply arbitrary accounts to any instruction, including the right account *type* at the wrong *instance* (e.g. someone else's profile), or uninitialized/attacker-owned accounts, attempting to spoof a PDA, or a real keypair standing in for a PDA-only signer.
 
-Assets at risk: the integrity of on-chain reputation data (scores, ratings, badges). The program holds no funds, so there is no direct custody risk; the risk is data integrity and manipulation of a signal other systems (including, eventually, Escrow) may rely on.
+Assets at risk: the integrity of on-chain reputation data (scores, ratings, badges). The program holds no funds, so there is no direct custody risk; the risk is data integrity and manipulation of a signal other systems rely on.
 
 ### 15.4 Trust Assumptions (explicitly out of this program's control)
 
 Documented rather than hidden, because an accurate security posture requires naming what is *not* enforced on-chain:
 
-- **Job identity is caller-supplied.** `submit_rating` takes `client` (the signer) and `freelancer` (an unchecked account) directly as instruction inputs; the program does not verify against Escrow that `job_id` corresponds to a real, completed `Gig` between those two parties. Anyone who can sign a transaction and knows a `job_id` that hasn't been rated yet can submit a rating for any `freelancer` account of their choosing. This is a consequence of Reputation being deliberately decoupled from Escrow today (ARCHITECTURE.md §3, §18) and is the responsibility of the caller (or, once CPI wiring exists, of Escrow) to constrain.
-- **`REPUTATION_AUTHORITY` is a single centralized signer** for `update_completion` and `award_badge`. Its private key is a trust bottleneck: whoever holds it can record arbitrary completions/earnings and award `TrustedFreelancer`/`FastDeliverer` badges (which have no on-chain eligibility check — see §21). This is an accepted, documented MVP trade-off (ARCHITECTURE.md §18), not an oversight; the account-constraint shape was chosen specifically so it can be replaced by a CPI-only check from Escrow without an account-layout migration.
+- **Job identity is attested by Escrow, not independently re-derived here.** `submit_rating`'s `job_id` is `gig.id` as supplied by Escrow's `rate_freelancer`; Reputation trusts that Escrow only invokes this CPI for a real, `Completed` gig between `client` and `freelancer` (Escrow enforces that with `has_one = client` and `gig.status == Completed` — see ARCHITECTURE.md §18). Reputation's own guarantees (range validation, one-rating-per-`job_id`, self-dealing rejection) hold regardless of what Escrow attests; only the *job-identity* claim itself is a trust boundary onto Escrow.
+- **Badge types with no on-chain signal are simply never eligible.** `TrustedFreelancer`/`FastDeliverer` return `false` unconditionally from `is_eligible_for_badge` (§21.6) until a real data source backs them — there is no authority that can currently award them, by design, since `award_badge` is permissionless.
+
+### 15.5 Why a PDA Signer Closes the Previous Trust Gap
+
+An earlier design point used a single hardcoded pubkey (`REPUTATION_AUTHORITY`) as the trusted caller for `update_completion`/`award_badge`. That keypair was a centralized bottleneck: whoever held its private key could forge arbitrary job completions, earnings, and badge awards, with no cryptographic tie to Escrow's actual settlement logic. Requiring a `seeds::program`-pinned PDA instead removes that bottleneck entirely — there is no private key to leak, rotate, or compromise; the only way to satisfy the constraint is a live CPI from the Escrow program's own executing code.
 
 ## 16. Signer Validation
 
 - `initialize_profile` — `authority` must sign; the PDA is derived from that same signer's key, so a profile can only ever be created "as" its own authority.
-- `submit_rating` — `client` must sign; `require_keys_neq!(client, freelancer)` prevents a client from rating their own freelancer profile (self-dealing).
-- `update_completion` / `award_badge` — the signer is constrained with `#[account(address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]`, i.e. only the one hardcoded authority pubkey is ever accepted, not merely "some signer."
+- `submit_rating` — `client` must sign (`require_keys_neq!(client, freelancer)` prevents self-dealing), **and** `escrow_authority` must sign, constrained to `seeds = [ESCROW_AUTHORITY_SEED], bump, seeds::program = ESCROW_PROGRAM_ID`. Only Escrow's own CPI can produce that second signature.
+- `update_completion` — `escrow_authority` alone, same PDA constraint as above.
+- `award_badge` — permissionless; `payer` only foots the new `Badge` account's rent. Eligibility is re-verified from the profile's own fields inside the handler (§21.6), so there is nothing a caller-supplied signer could otherwise gate.
 - `get_profile` — read-only, no signer required.
 
-`tests/profile_authorization.rs` (10 tests) and `tests/regressions.rs` (10 tests, including `test_authority_check_not_bypassed` and `test_self_dealing_check_not_bypassed`) assert every signer-gated instruction rejects the wrong signer.
+`tests/profile_authorization.rs`, `tests/pda_security.rs`, and `programs/escrow/tests/reputation_settlement.rs` (the real cross-program CPI path) assert every signer-gated instruction rejects the wrong signer — including an attacker's own real keypair standing in for `escrow_authority`, which fails Anchor's `seeds`/`seeds::program` constraint rather than any custom check.
 
 ## 17. Ownership & Account-Type Validation
 
@@ -196,7 +231,7 @@ Verified by `tests/pda_security.rs` (12 tests): wrong profile PDA, wrong rating 
 - `submit_rating`'s `Rating` PDA is seeded by `job_id` alone, so a second `submit_rating` for the same `job_id` — a replay or duplicate-rating attempt — fails at `init` time. This is the program's entire duplicate-rating defense, and it is structural (seed collision) rather than a runtime `require!` check that could be forgotten on a future code path.
 - `award_badge`'s `Badge` PDA is seeded by `(profile, badge_type)`, so a second award of the same badge type to the same profile fails at `init` time — duplicate-badge prevention, structurally enforced the same way.
 
-`tests/regressions.rs` includes `test_duplicate_prevention_not_bypassed`; `tests/rating_submission.rs` (17 tests) and `tests/badge_system.rs` (18 tests) each dedicate cases to the duplicate-`job_id`/duplicate-`badge_type` paths specifically.
+`programs/escrow/tests/reputation_settlement.rs::test_rate_freelancer_rejects_duplicate_rating` and `test_settle_reputation_cannot_fire_twice` exercise the duplicate-`job_id` and duplicate-settlement paths through the real CPI.
 
 ## 20. Checked Arithmetic — Overflow & Underflow Protection
 
@@ -206,33 +241,33 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 - `average_rating` promotes through `checked_mul(rating_sum, RATING_SCALE)` then `checked_div(_, rating_count)` before a final `u32::try_from` bounds check — an overflow at any step aborts rather than wrapping or truncating silently.
 - `compute_reputation_score` (§21) uses `checked_mul`/`checked_add` for every weighted term and `saturating_sub` (not raw subtraction) for the cancellation penalty, explicitly to avoid underflow when the penalty term exceeds the weighted sum — the result is clamped to `0` rather than wrapping to a near-`u64::MAX` value.
 
-`tests/math.rs` (7 tests) and `tests/reputation_algorithm.rs` (11 tests, including `test_score_does_not_overflow_with_extreme_values`) cover boundary values including near-`u64::MAX` inputs; `src/utils.rs` also carries inline `#[cfg(test)]` unit tests (`checked_add_overflows`, `checked_sub_underflows`) exercising the helpers directly.
+`src/utils.rs` carries inline `#[cfg(test)]` unit tests (`checked_add_overflows`, `checked_sub_underflows`, `reputation_score_never_underflows_below_zero`, `reputation_score_is_maxed_for_ideal_profile`) exercising the pure math directly, including near-boundary and near-`u64::MAX` inputs, independent of any account/CPI plumbing.
 
 ## 21. Reputation Score & Rating Integrity
 
 ### 21.1 Immutable Ratings
 
-`Rating` has no update or delete instruction. Once `submit_rating` succeeds, `score`, `review_hash`, `client`, `freelancer`, and `submitted_at` are permanent. `tests/state_invariants.rs` includes `test_ratings_immutable`.
+`Rating` has no update or delete instruction. Once `submit_rating` succeeds, `score`, `review_hash`, `client`, `freelancer`, and `submitted_at` are permanent, and the PDA seed (`job_id` alone) makes a second submission for the same job fail at `init` time rather than needing a runtime check.
 
 ### 21.2 Immutable Profile Authority
 
-`UserProfile.authority` is set once at `init` and never written by any other instruction. `tests/state_invariants.rs` includes `test_profile_authority_immutable`.
+`UserProfile.authority` is set once at `init` and never written by any other instruction.
 
 ### 21.3 Rating Validation
 
-`submit_rating` requires `(MIN_RATING..=MAX_RATING).contains(&score)` i.e. `1..=5`, rejecting `0` and anything `> 5` with `ReputationError::InvalidRating`. `tests/rating_validation.rs` (9 tests) and `tests/regressions.rs::test_range_check_not_bypassed` cover the boundary.
+`submit_rating` requires `(MIN_RATING..=MAX_RATING).contains(&score)` i.e. `1..=5`, rejecting `0` and anything `> 5` with `ReputationError::InvalidRating`.
 
-### 21.4 Authority Validation for Privileged Actions
+### 21.4 Authorization for Privileged Actions
 
-`update_completion` and `award_badge` both require the signer to equal `REPUTATION_AUTHORITY` exactly (§16, §15.4). This is the program's central trust assumption today and is disclosed, not hidden, in ARCHITECTURE.md §18.
+`update_completion` requires `escrow_authority` to be a real signature over the PDA derived from `[ESCROW_AUTHORITY_SEED]` under `ESCROW_PROGRAM_ID` (§16). `award_badge` requires no privileged signer at all — it recomputes eligibility from the profile's own already-verified fields on every call, so there is no caller-supplied claim to gate. See §15.5 for why the PDA-signer model replaces the earlier hardcoded-authority design.
 
 ### 21.5 Deterministic Reputation Calculation
 
-`compute_reputation_score` is a pure function of `UserProfile`'s own stored fields (`completed_jobs`, `successful_jobs`, `total_earnings`, `average_rating`, `cancelled_jobs`) — a weighted sum of four capped components (success rate, average rating, completed-job volume, lifetime earnings) minus a cancellation penalty, clamped to `[0, MAX_REPUTATION_SCORE]`. No randomness, no external oracle, no off-chain input: the same stored fields always produce the same score, and any observer can recompute and verify it independently from public account data. `tests/reputation_algorithm.rs` (11 tests) includes `test_score_is_deterministic` and `test_score_equal_for_identical_inputs`.
+`compute_reputation_score` is a pure function of `UserProfile`'s own stored fields (`completed_jobs`, `successful_jobs`, `total_earnings`, `average_rating`, `cancelled_jobs`) — a weighted sum of four capped components (success rate, average rating, completed-job volume, lifetime earnings) minus a cancellation penalty, clamped to `[0, MAX_REPUTATION_SCORE]`. No randomness, no external oracle, no off-chain input: the same stored fields always produce the same score, and any observer can recompute and verify it independently from public account data.
 
 ### 21.6 Badge Eligibility
 
-`is_eligible_for_badge` deterministically checks five of the seven badge types against on-chain profile fields (`FirstGig`, `TenCompletedJobs`, `HundredCompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer` and `FastDeliverer` return `true` unconditionally and rely entirely on `REPUTATION_AUTHORITY`'s judgment plus the structural one-per-type duplicate guard (§19). This split is documented in source (`utils.rs`) and in ARCHITECTURE.md §19 rather than presented as a uniform on-chain guarantee. `tests/badge_system.rs` (18 tests) covers eligibility for every badge type, including the two authority-attested ones.
+`is_eligible_for_badge` deterministically checks five of the seven badge types against on-chain profile fields (`FirstGig`, `TenCompletedJobs`, `HundredCompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer` and `FastDeliverer` return `false` unconditionally, since `award_badge` is now permissionless and no on-chain signal yet backs those two types (§15.4). `pda_security.rs::test_trusted_freelancer_badge_not_awardable_yet` and `test_badge_award_fails_without_eligibility` cover both the unattested-type and zero-completions cases; positive-path eligibility (after real completions/ratings via the Escrow CPI) is covered in `programs/escrow/tests/reputation_settlement.rs`.
 
 ### 21.7 Metadata Bounds
 
@@ -240,11 +275,11 @@ All counter/score math routes through `programs/reputation/src/utils.rs`'s `chec
 
 ## 22. Event Correctness
 
-Every emitting instruction's event (`ProfileCreated`, `RatingSubmitted`, `CompletionUpdated`, `BadgeAwarded`) is asserted field-for-field against the instruction's actual resulting account state in `tests/events.rs` (10 tests). `ProfileUpdated` is defined but not currently emitted by any instruction — see ARCHITECTURE.md §17 — and is called out here so it is not mistaken for a monitored, silently-broken event path.
+`ProfileCreated` is asserted field-for-field against the instruction's actual resulting account state in `tests/events.rs`. `RatingSubmitted`, `CompletionUpdated`, and `BadgeAwarded` are now only reachable through Escrow's CPI and are exercised end-to-end (event emission plus resulting state) in `programs/escrow/tests/reputation_settlement.rs`. `ProfileUpdated` is defined but not currently emitted by any instruction — see ARCHITECTURE.md §17 — and is called out here so it is not mistaken for a monitored, silently-broken event path.
 
 ## 23. State Consistency
 
-`tests/state_invariants.rs` (10 tests) directly asserts the invariants a reputation record must never violate: `completed_jobs >= successful_jobs`, `total_earnings` never decreases, `updated_at` is monotonically non-decreasing, `created_at` never changes, `average_rating` stays within `[0, 500]`, badges are unique per type, and `reputation_score` is reproducible from stored fields after an arbitrary sequence of operations (`test_all_invariants_hold_after_multiple_operations`).
+Invariants a reputation record must never violate — `completed_jobs >= successful_jobs`, `total_earnings` never decreases, `updated_at` is monotonically non-decreasing, `created_at` never changes, `average_rating` stays within `[0, 500]`, badges are unique per type — are enforced structurally (checked arithmetic with no decrement instruction, PDA-`init` uniqueness) and verified through the real settlement path in `programs/escrow/tests/reputation_settlement.rs`.
 
 ## 24. Error Handling
 
@@ -252,17 +287,18 @@ Every emitting instruction's event (`ProfileCreated`, `RatingSubmitted`, `Comple
 
 ## 25. Regression Coverage
 
-`tests/regressions.rs` (10 tests) specifically re-asserts, as a group, that no previously-fixed or previously-verified check has been silently bypassed: range validation, authority validation, duplicate-prevention, self-dealing prevention, and eligibility validation are each re-checked directly rather than only incidentally through happy-path tests.
+`programs/escrow/tests/reputation_settlement.rs` re-asserts, as a group, that the CPI security model holds under attack: a real (non-PDA) keypair impersonating `escrow_authority` is rejected, `settle_reputation` cannot fire twice per gig, `rate_freelancer` cannot be called before the gig is `Completed` or by anyone other than the real client, and duplicate ratings for the same job are rejected. `programs/reputation/tests/pda_security.rs` covers the same forgery attempts directly against the reputation program in isolation.
 
 ## 26. Summary of Enforced Invariants (Reputation)
 
 1. A profile can be created exactly once per authority.
 2. A job can be rated exactly once, ever, regardless of which client submits it.
 3. A badge type can be awarded to a given profile exactly once.
-4. Only `REPUTATION_AUTHORITY` can record completions or award badges.
+4. Only a live CPI from Escrow's own `escrow_authority` PDA can record completions or attest ratings; `award_badge` is permissionless but self-verifying.
 5. A client cannot rate a job where they are also the freelancer.
 6. Ratings are immutable once submitted.
 7. A profile's `authority` field never changes after creation.
+8. `settle_reputation` can credit a gig's earnings to a profile at most once (`vault.reputation_synced`).
 8. `total_earnings`, `completed_jobs`, `successful_jobs`, `cancelled_jobs`, `rating_count`, `badges_earned` only ever increase.
 9. `reputation_score` is always a pure, deterministic, independently-verifiable function of the profile's own stored fields.
 10. All arithmetic on counters/scores is checked or explicitly saturating; overflow aborts the transaction, and the score is clamped rather than allowed to wrap.

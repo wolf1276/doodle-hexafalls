@@ -1,28 +1,34 @@
-# Escrow Program — Architecture
+# Gig + Escrow Programs — Architecture
 
-Status: **Implemented and internally audited; not deployed.** Program: `programs/escrow` (Anchor, `declare_id!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS")`).
+Status: **Implemented and internally audited; not deployed.** Programs: `programs/gig` (Anchor, `declare_id!("9LpGZY8p8dYfYdWm5D9MuvGXh9VXdF8DqEEAmdNZ92Na")`) and `programs/escrow` (Anchor, `declare_id!("FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS")`).
 
-The escrow program owns **both** the gig lifecycle and the milestone escrow. The empty `programs/gig` directory is a leftover scaffold, not a separate program: gig state lives here so that a milestone release can advance gig status atomically in one instruction.
+Gig and Escrow are two independently-deployable programs that cooperate through a small, one-directional CPI surface. Gig owns job metadata and lifecycle; Escrow owns milestone funds and payment lifecycle. Neither embeds the other's state — they reference each other only by account (Gig's pubkey, stored on Escrow's `Milestone`/`EscrowVault`) and by CPI (Escrow calling three narrowly-scoped, escrow-only instructions on Gig).
 
 ## 1. Protocol Overview
 
 PayGig splits on-chain responsibility into independent programs instead of one monolith:
 
 ```
-┌─────────────┐      ┌──────────────┐      ┌────────────────┐
-│   Escrow     │      │  Reputation  │      │    Dispute      │
-│  (payments)  │      │  (scoring)   │      │  (not yet live) │
-└─────────────┘      └──────────────┘      └────────────────┘
+┌─────────────┐      ┌──────────────┐      ┌──────────────┐      ┌────────────────┐
+│     Gig      │─CPI─▶│   Escrow     │      │  Reputation  │      │    Dispute      │
+│ (job/status) │◀─CPI─│  (payments)  │      │  (scoring)   │      │  (not yet live) │
+└─────────────┘      └──────────────┘      └──────────────┘      └────────────────┘
 ```
 
-Escrow and Reputation are both implemented and internally audited; the Dispute program is an empty placeholder. Neither program is deployed to a public cluster yet. Escrow owns exactly one job: **hold client funds and release them to the freelancer according to a fixed set of rules** (plus the gig-listing state that job runs against). It has no knowledge of ratings, disputes, or reputation.
+Gig, Escrow, and Reputation are all implemented and internally audited; the Dispute program is an empty placeholder. None are deployed to a public cluster yet.
 
-## 2. Why Escrow Only Manages Payments
+- **Gig** owns exactly one job: **describe a piece of work and track who's doing it, in what status.** It never touches tokens.
+- **Escrow** owns exactly one job: **hold client funds and release them to the freelancer according to a fixed set of rules.** It never owns gig metadata — it reads a `Gig` account it doesn't own, and only ever *reads* its fields (`client`, `freelancer`, `mint`, `status`, `id`, `bump`) to validate against, never writes them directly.
 
-- **Smaller attack surface.** A program that only moves SPL tokens between a vault and two known parties is far easier to reason about, audit, and formally enumerate invariants for than a program that also handles voting, badge minting, or arbitrary off-chain rating input.
-- **Independent upgrade paths.** Reputation scoring rules and dispute-resolution mechanics will change far more often (game-design tuning, jury economics) than payment/escrow rules should. Coupling them would force the security-critical vault logic to be re-reviewed every time an unrelated scoring tweak ships.
-- **Failure isolation.** If the reputation or dispute program has a bug, funds already locked in an escrow vault are unaffected — the vault's authority is a PDA owned solely by the escrow program's own seeds, not by any cross-program state.
-- **No unnecessary CPI surface.** The current implementation performs zero outbound CPIs to other custom programs — only inbound CPIs to the SPL Token program for `transfer_checked`. Every code path that moves value is visible in `programs/escrow/src/instructions/`.
+The only writes Escrow causes on a `Gig` account happen through three CPI-only Gig instructions (§5.3) — Escrow proposes a state transition, Gig's own program enforces whether that transition is legal and executes it.
+
+## 2. Why Job Metadata and Payments Are Separate Programs
+
+- **Smaller attack surface per program.** Gig's instructions never move a token; Escrow's `Gig`-touching instructions never write gig metadata. An auditor reviewing the money path (`programs/escrow/src/instructions/{create,fund}_milestone.rs`, `approve_milestone.rs`, `*_timeout_release.rs`) never has to also reason about title-length validation or category strings.
+- **Independent deployability.** Gig's client-facing lifecycle (listings, drafts, categories) can evolve — new fields, new validation, new instructions — without touching Escrow's declared program ID, IDL, or audited vault-custody code, and vice versa.
+- **Single source of truth, no duplicated metadata.** Escrow's `Milestone` and `EscrowVault` store only `gig: Pubkey` — never a copy of title/description/skills/category/deadline/visibility. Anything about the job itself is read once, live, from the Gig program's own account; there is no second copy that can drift out of sync.
+- **Least-privilege CPI.** Escrow does not have general write access to `Gig` — it can trigger exactly three, narrowly-defined transitions (`mark_in_progress`, `mark_completed_by_escrow`, `mark_cancelled_by_escrow`), each gated by Gig's own status-precondition check and by a signer PDA only Escrow can produce (§5.4). Escrow cannot, for instance, change a gig's title, reassign its freelancer, or force it into `Published`.
+- **Failure isolation.** A bug in Gig's listing/metadata logic cannot corrupt vault accounting, because Escrow never lets Gig write to `Milestone` or `EscrowVault` — the CPI direction is one-way (Escrow → Gig only; Gig never calls back into Escrow).
 
 ## 3. Why Reputation and Disputes Are Separate Programs
 
@@ -36,7 +42,7 @@ This separation is intentional, not an oversight:
 
 ## 4. Account Architecture
 
-### 4.1 Gig Account (PDA)
+### 4.1 Gig Account (PDA — owned by `programs/gig`)
 
 ```
 Gig {
@@ -44,9 +50,7 @@ Gig {
   client: Pubkey
   freelancer: Pubkey       // Pubkey::default() until assign_freelancer
   mint: Pubkey             // SPL mint every milestone is funded in (e.g. USDC)
-  milestone_count: u32
-  active_milestone: u32
-  status: GigStatus        // Draft | Published | Assigned | Completed | Cancelled | Archived
+  status: GigStatus        // Draft | Published | Assigned | InProgress | Completed | Cancelled | Archived
   created_at: i64
   updated_at: i64
   title: String            // <= MAX_TITLE_LEN (100)
@@ -59,11 +63,11 @@ Gig {
 }
 ```
 
-One `Gig` account exists per engagement between a client and a freelancer. It is the root of trust for every other account in the tree — `has_one` constraints on `client`/`freelancer` throughout the program all resolve back to this account.
+One `Gig` account exists per engagement between a client and a freelancer. It is the root of trust for every other account in the tree — `has_one` constraints on `client`/`freelancer` throughout both programs all resolve back to this account. Escrow imports this exact type from the `gig` crate (`gig = { path = "../gig", features = ["cpi"] }`); it never defines its own copy, so there is only ever one on-chain (and one Rust-type) definition of what a Gig is.
 
-The gig also carries its own marketplace metadata (title, description, skills, category, budget, deadline), so a listing is fully describable from on-chain state without an off-chain database. `budget` is advertised intent; the amounts actually escrowed are the per-milestone `amount` fields.
+The gig also carries its own marketplace metadata (title, description, skills, category, budget, deadline), so a listing is fully describable from on-chain state without an off-chain database. `budget` is advertised intent; the amounts actually escrowed are the per-milestone `amount` fields. Note `milestone_count`/`active_milestone` are **not** stored here — they moved to `EscrowVault` (§4.3) because they are payment-lifecycle bookkeeping, not job metadata; keeping them off the Gig account means Gig never needs to know how many milestones exist or how many have cleared.
 
-### 4.2 Milestone Account (PDA)
+### 4.2 Milestone Account (PDA — owned by `programs/escrow`)
 
 ```
 Milestone {
@@ -78,9 +82,9 @@ Milestone {
 }
 ```
 
-Milestones are created sequentially (`index` == `gig.milestone_count` at creation time) and are independently funded, delivered, and released. `released` tracks cumulative payout so partial timeout releases and the final release never double-pay.
+Milestones are created sequentially (`index` == `vault.milestone_count` at creation time) and are independently funded, delivered, and released. `released` tracks cumulative payout so partial timeout releases and the final release never double-pay. `Milestone` stores only `gig: Pubkey` — never a copy of any Gig metadata — so the Gig program remains the single source of truth for everything about the job itself.
 
-### 4.3 Vault (EscrowVault PDA + Vault Token Account)
+### 4.3 Vault (EscrowVault PDA + Vault Token Account — owned by `programs/escrow`)
 
 ```
 EscrowVault {
@@ -89,55 +93,67 @@ EscrowVault {
   mint: Pubkey
   total_locked: u64
   total_released: u64
+  milestone_count: u32     // milestones created for this gig (escrow-owned counter)
+  active_milestone: u32    // milestones fully released so far
   bump: u8
 }
 ```
 
-One vault per `Gig`, shared by every milestone under that gig. `EscrowVault` is a small bookkeeping account; the actual SPL tokens live in a separate **Vault Token Account** (an `spl-token` `TokenAccount` whose `authority` is the `EscrowVault` PDA itself). `total_locked`/`total_released` are running counters checked against actual token balances by the test suite (see `tests/vault_accounting.rs`).
+One vault per `Gig`, shared by every milestone under that gig. `EscrowVault` is a small bookkeeping account; the actual SPL tokens live in a separate **Vault Token Account** (an `spl-token` `TokenAccount` whose `authority` is the `EscrowVault` PDA itself). `total_locked`/`total_released` are running counters checked against actual token balances by the test suite. `milestone_count`/`active_milestone` live here (not on `Gig`) precisely because they are Escrow's own payment-lifecycle state — Gig never needs to track "how many milestones" for a job it doesn't fund.
 
 ### 4.4 Account Relationships
 
 ```
-Gig (1) ──┬──< Milestone (N, seeded by gig + index)
-          │
-          └──< EscrowVault (1, seeded by gig)
-                    │
-                    └── Vault Token Account (1, seeded by gig + "token", authority = EscrowVault)
+Gig (1, programs/gig) ──┬──< Milestone (N, programs/escrow, seeded by gig + index)
+                         │
+                         └──< EscrowVault (1, programs/escrow, seeded by gig)
+                                   │
+                                   └── Vault Token Account (1, seeded by gig + "token", authority = EscrowVault)
 ```
+
+`Gig` is the only account in this tree owned by a different program than the rest — Escrow reads it via `Account<'info, gig::Gig>` (Anchor enforces the owner check automatically from the imported type's declared program ID) but never `init`s, closes, or directly mutates it.
 
 ## 5. Instruction Flow / State Machine
 
-The program exposes **14 instructions** in two layers: six gig-lifecycle instructions that move `GigStatus`, and eight milestone/escrow instructions that move `MilestoneStatus` and tokens.
+The protocol exposes **7 Gig instructions** (4 client lifecycle + 3 CPI-only) and **7 Escrow instructions** (all payment/milestone), cooperating through the CPI surface in §5.3–5.4.
 
-### 5.1 Gig lifecycle
+### 5.1 Gig lifecycle (client-driven, `programs/gig`)
 
 ```
 initialize_gig ──► Draft ──publish_gig──► Published ──assign_freelancer──► Assigned
                      │                        │                              │
                   update_gig                  │                        complete_gig
-                  (Draft only)                │                              │
-                     │                        │                              ▼
+                  (Draft only)                │                     (no-escrow path only)
+                     │                        │                              │
                      └──────── cancel_gig ────┴──────────────►          Completed ──archive_gig──► Archived
-                                              │
-                                              ▼
-                                          Cancelled
+                            (Draft/Published/                                ▲
+                             Assigned only)                                  │
+                                              │                    mark_completed_by_escrow (CPI)
+                                              ▼                              │
+                                          Cancelled ◄── mark_cancelled_by_escrow (CPI)
+                                              ▲                              │
+                                              │                        InProgress
+                                              └──────────────────── mark_in_progress (CPI)
+                                                                      (from Assigned)
 ```
 
 - `update_gig` is valid only in `Draft`; once published, listing metadata is frozen.
 - `assign_freelancer` requires `Published`, rejects the client assigning themselves, and rejects reassignment once `gig.freelancer` is set.
-- `cancel_gig` is valid from `Draft`, `Published`, or `Assigned`. `Completed`, `Cancelled`, and `Archived` are terminal.
-- `complete_gig` lets a client close an `Assigned` gig directly; the milestone path (§5.2) also flips the gig to `Completed` when the final milestone settles.
-- Every one of these six instructions requires the client's signature and `has_one = client`.
+- `cancel_gig` (client-signed) is valid from `Draft`, `Published`, or `Assigned` only — once a gig is `InProgress` (i.e. escrow has funded at least one milestone), cancellation must go through Escrow's `cancel_before_funding` → `mark_cancelled_by_escrow` CPI (§5.3), since only Escrow knows whether funds are already locked.
+- `complete_gig` (client-signed) is the manual path for a gig that never entered escrow (no milestones ever funded) — it requires `Assigned`, not `InProgress`. Once a gig has been funded, only Escrow can complete it, via `mark_completed_by_escrow`.
+- `Completed`, `Cancelled`, and `Archived` are terminal.
+- Every client-facing instruction requires the client's signature and `has_one = client`.
 
-### 5.2 Milestone / escrow flow
+### 5.2 Milestone / escrow flow (`programs/escrow`)
 
 ```
-create_milestone (requires gig.status == Assigned)
+create_milestone (requires gig.status == Assigned || InProgress)
       │
       ▼
 Milestone::PendingFunding
       │
       ▼ fund_milestone (client transfer_checked → vault)
+      │      └─ if gig.status == Assigned: CPI mark_in_progress ──► Gig: Assigned → InProgress
 Milestone::Funded
       │
       ▼ submit_delivery (freelancer)
@@ -152,31 +168,67 @@ Milestone::Submitted ──► submitted_at = now
       │                               └──► Milestone::Completed (remaining 80% released)
 ```
 
-`cancel_before_funding` is the only exit from `PendingFunding`: it closes the milestone (rent refunded to client) and marks the gig `Cancelled`. It is unavailable once a milestone has been funded — funds can only leave the vault through `approve_milestone`, `partial_timeout_release`, or `full_timeout_release`.
+`cancel_before_funding` is the only exit from `PendingFunding`: it closes the milestone (rent refunded to client) and, via CPI, marks the gig `Cancelled` (§5.3). It is unavailable once a milestone has been funded — funds can only leave the vault through `approve_milestone`, `partial_timeout_release`, or `full_timeout_release`.
 
-When the last milestone under a gig reaches `Completed` (via approval or full timeout), `Gig.status` flips to `Completed` in the same instruction — no separate closing call is required. A client may also close an `Assigned` gig directly with `complete_gig` (§5.1), which is the path for a gig with no remaining milestones. `archive_gig` then moves a `Completed` gig out of the active set.
+When the last milestone under a gig reaches `Completed` (`vault.active_milestone + 1 >= vault.milestone_count`, via approval or full timeout), Escrow CPIs into `mark_completed_by_escrow`, flipping `Gig.status` to `Completed` in the same transaction.
+
+### 5.3 The CPI Surface (Escrow → Gig)
+
+Escrow calls exactly three Gig instructions, each gated by Gig's own precondition check — Escrow proposes, Gig enforces:
+
+| Gig instruction | Called from | Precondition (checked by Gig) | Transition |
+|---|---|---|---|
+| `mark_in_progress` | `fund_milestone`, on the gig's first funding | `gig.status == Assigned` | `Assigned → InProgress` |
+| `mark_completed_by_escrow` | `approve_milestone` / `full_timeout_release`, on the last milestone | `gig.status == InProgress` | `InProgress → Completed` |
+| `mark_cancelled_by_escrow` | `cancel_before_funding` | `gig.status ∈ {Assigned, InProgress}` | `→ Cancelled` |
+
+Gig never calls back into Escrow — the CPI direction is strictly one-way. Escrow's `Gig`-touching instructions never write `Gig` fields directly; every mutation of `GigStatus` triggered by escrow activity happens *inside the Gig program's own instruction handler*, reached only via CPI.
+
+### 5.4 CPI Authorization — the `escrow_authority` Signer PDA
+
+Each of the three CPI-only Gig instructions requires an `escrow_authority: Signer<'info>` account constrained by:
+
+```rust
+#[account(
+    seeds = [ESCROW_AUTHORITY_SEED],   // b"escrow_authority"
+    bump,
+    seeds::program = ESCROW_PROGRAM_ID, // Escrow's declare_id!, hardcoded in programs/gig/src/constants.rs
+)]
+pub escrow_authority: Signer<'info>,
+```
+
+`seeds::program` tells Anchor (and, underneath it, the Solana runtime) that this PDA must have been derived — and *signed for* via `invoke_signed` — by the program whose ID is `ESCROW_PROGRAM_ID`. The runtime itself enforces this: a program can only produce a valid PDA signature for seeds derived under *its own* program ID, so no program other than Escrow can ever construct a valid signer for `[b"escrow_authority"]` under `ESCROW_PROGRAM_ID`. This is the entire trust mechanism — Gig does not maintain an allow-list, does not check `instruction_sysvar` introspection, and does not require any registration step; the cryptographic guarantee is structural. See SECURITY.md for the corresponding negative tests (calling these instructions directly, or from a forged signer, is rejected).
 
 ## 6. Event Architecture
 
-Every state-changing instruction emits a typed Anchor event (`programs/escrow/src/events.rs`), giving off-chain indexers (e.g. `services/reputation-indexer`) a complete, replayable log without needing to poll account state:
+Every state-changing instruction emits a typed Anchor event, giving off-chain indexers (e.g. `services/reputation-indexer`) a complete, replayable log without needing to poll account state. Events are now split across two programs' `events.rs`:
+
+### 6.1 Gig events (`programs/gig/src/events.rs`)
 
 | Event | Emitted by |
 |---|---|
 | `GigCreated` | `initialize_gig` |
+| `GigUpdated` | `update_gig` |
+| `GigPublished` | `publish_gig` |
+| `FreelancerAssigned` | `assign_freelancer` |
+| `GigInProgress` | `mark_in_progress` (CPI from Escrow) |
+| `GigCompleted` | `complete_gig` (manual) and `mark_completed_by_escrow` (CPI) |
+| `GigArchived` | `archive_gig` |
+| `GigCancelled` | `cancel_gig` (manual) and `mark_cancelled_by_escrow` (CPI) |
+
+### 6.2 Escrow events (`programs/escrow/src/events.rs`)
+
+| Event | Emitted by |
+|---|---|
 | `MilestoneCreated` | `create_milestone` |
 | `MilestoneFunded` | `fund_milestone` |
 | `DeliverySubmitted` | `submit_delivery` |
 | `MilestoneApproved` | `approve_milestone` |
 | `PartialReleaseExecuted` | `partial_timeout_release` |
 | `FullReleaseExecuted` | `full_timeout_release` |
-| `GigUpdated` | `update_gig` |
-| `GigPublished` | `publish_gig` |
-| `FreelancerAssigned` | `assign_freelancer` |
-| `GigCompleted` | `complete_gig` |
-| `GigArchived` | `archive_gig` |
-| `GigCancelled` | `cancel_gig` (with `milestone = Pubkey::default()`, `index = 0`) and `cancel_before_funding` (with the closed milestone's key and index) |
+| `MilestoneCancelledBeforeFunding` | `cancel_before_funding` |
 
-Thirteen events in total, one per state-changing instruction. Coverage is verified directly (`tests/events.rs`, 14 tests) — every instruction's event fields are asserted against the instruction's actual effects.
+One event per state-changing instruction in each program. Coverage is verified directly in each program's `tests/events.rs` — every instruction's event fields are asserted against the instruction's actual effects.
 
 ## 7. Token Flow / SPL Token CPI Architecture
 
@@ -210,8 +262,9 @@ Every PDA in this program is derived from `Pubkey::find_program_address(seeds, p
 | **Milestone PDA** | `[MILESTONE_SEED, gig.key(), gig.milestone_count.to_le_bytes()]` | Binds every milestone to its exact parent gig and its sequential position (the index is the gig's current `milestone_count`, incremented in the same instruction); two different gigs can never collide on a milestone address, and milestone `N` for a gig is always at the same deterministic address |
 | **Vault PDA (`EscrowVault`)** | `[VAULT_SEED, gig.key()]` | One vault per gig; deriving from the gig alone (not from a milestone) is what lets multiple milestones share a single vault and its running `total_locked`/`total_released` counters |
 | **Vault Token Account** | `[VAULT_SEED, gig.key(), b"token"]` | A distinct sub-seed from the `EscrowVault` bookkeeping PDA, so the SPL token account and the bookkeeping struct are two separately-addressable accounts even though they represent the same vault |
+| **Escrow Authority PDA** | `[ESCROW_AUTHORITY_SEED]` (`b"escrow_authority"`), under the Escrow program | Escrow's own CPI-signer identity — not a data account, never `init`ed, exists purely so Escrow can `invoke_signed` into Gig's CPI-only instructions (§5.4). Verified on the Gig side via `seeds::program = ESCROW_PROGRAM_ID` |
 
-`GIG_SEED`, `MILESTONE_SEED`, and `VAULT_SEED` are `#[constant]` byte strings (`programs/escrow/src/constants.rs`), so they are also embedded in the program's IDL for client-side address derivation.
+`GIG_SEED` lives in `programs/gig/src/constants.rs`; `MILESTONE_SEED`, `VAULT_SEED`, and `ESCROW_AUTHORITY_SEED` live in `programs/escrow/src/constants.rs`. All are `#[constant]` byte strings, embedded in each program's IDL for client-side address derivation.
 
 ### 8.3 Bump Seeds and Program Signing
 
@@ -221,7 +274,7 @@ Each PDA account stores its own `bump: u8`, captured at creation time (`ctx.bump
 let signer_seeds: &[&[&[u8]]] = &[&[VAULT_SEED, gig_key.as_ref(), &[vault_bump]]];
 ```
 
-— and pass them to `CpiContext::new_with_signer`. The runtime independently re-derives the PDA from these seeds and confirms it matches the account being signed for; a caller cannot forge a signature for the vault by supplying a different bump, because Anchor's `bump = vault.bump` constraint on the account already validated that the stored bump reproduces the vault's actual address before the instruction body ever runs.
+— and pass them to `CpiContext::new_with_signer`. The same pattern secures the CPI into Gig: `fund_milestone`, `approve_milestone`/`full_timeout_release`, and `cancel_before_funding` each build `&[&[ESCROW_AUTHORITY_SEED, &[ctx.bumps.escrow_authority]]]` and pass it to `CpiContext::new_with_signer` when calling `gig::cpi::mark_in_progress` / `mark_completed_by_escrow` / `mark_cancelled_by_escrow` — the runtime independently confirms this signature could only have been produced by the Escrow program itself (§5.4). The runtime independently re-derives the PDA from these seeds and confirms it matches the account being signed for; a caller cannot forge a signature for the vault by supplying a different bump, because Anchor's `bump = vault.bump` constraint on the account already validated that the stored bump reproduces the vault's actual address before the instruction body ever runs.
 
 ### 8.4 Why PDAs Have No Private Keys — and Why That Matters Here
 
@@ -233,7 +286,9 @@ Because a PDA sits deliberately off the Ed25519 curve, no keypair exists that co
 
 ## 9. Security Model (summary — full detail in SECURITY.md)
 
-The vault token account's SPL `authority` field is the `EscrowVault` PDA, which has no private key. The only way to debit it is a CPI signed with that PDA's exact seeds — meaning the *only* code path capable of moving vault funds is the escrow program's own `approve_milestone` / `partial_timeout_release` / `full_timeout_release` handlers, each of which independently re-derives the vault from `[VAULT_SEED, gig]` and checks `vault.bump` and `vault.mint`. See [SECURITY.md](./SECURITY.md).
+The vault token account's SPL `authority` field is the `EscrowVault` PDA, which has no private key. The only way to debit it is a CPI signed with that PDA's exact seeds — meaning the *only* code path capable of moving vault funds is the escrow program's own `approve_milestone` / `partial_timeout_release` / `full_timeout_release` handlers, each of which independently re-derives the vault from `[VAULT_SEED, gig]` and checks `vault.bump` and `vault.mint`.
+
+Symmetrically, the only way to write `Gig.status` from outside the Gig program is a CPI signed with the `escrow_authority` PDA's exact seeds under Escrow's own program ID — meaning the *only* code path capable of moving a `Gig` through `mark_in_progress`/`mark_completed_by_escrow`/`mark_cancelled_by_escrow` is Escrow's own instruction handlers, each of which independently re-derives that signer and each of which Gig re-validates against its own status precondition before accepting the transition (§5.3–5.4). See [SECURITY.md](./SECURITY.md).
 
 ## 10. Design Rationale Summary
 
@@ -245,7 +300,9 @@ The vault token account's SPL `authority` field is the `EscrowVault` PDA, which 
 | Timeout releases are permissionless | A silent client cannot hold a freelancer's payment hostage indefinitely by simply not signing anything — anyone (including automation) can trigger the timeout instructions once the deadline passes |
 | Partial (20%) before full (7d) timeout | Gives the freelancer partial relief quickly (72h) while still preserving the client's ability to dispute or object within a longer window before the remainder auto-releases |
 | No CPI to reputation/dispute programs | See §3 — isolates the audited payment path from higher-churn, less-audited logic |
-| Gig lifecycle lives in the escrow program, not a separate `gig` program | A milestone release must be able to advance `GigStatus` atomically. Splitting them would require a CPI (or a second transaction) on the money path purely for bookkeeping, widening the custody trust boundary for no gain |
+| Gig lifecycle is a separate program from Escrow, connected by CPI | Keeps job metadata and payment custody independently auditable and deployable (§2). The atomicity concern from a single-program design is preserved: `mark_in_progress`/`mark_completed_by_escrow`/`mark_cancelled_by_escrow` execute inside the *same transaction* as the milestone action that triggers them, so `Gig.status` and `Milestone`/`EscrowVault` state never observably diverge — Escrow's instruction fails atomically if the CPI fails |
+| `milestone_count`/`active_milestone` moved from `Gig` to `EscrowVault` | These are payment-lifecycle counters (how many milestones exist, how many have cleared), not job metadata — keeping them on Escrow's own account means Gig needs zero additional CPI instructions just to keep a counter in sync |
+| CPI authorization via a `seeds::program`-constrained signer PDA, not an allow-list or admin flag | The Solana runtime itself guarantees only Escrow can produce a valid signature for `[b"escrow_authority"]` under Escrow's program ID (§5.4) — no mutable "trusted callers" list exists to be misconfigured or to require an upgrade to change |
 | Listing metadata (title/description/skills/category/budget/deadline) stored on-chain | A gig is fully describable from chain state alone, so an indexer or an alternative frontend needs no privileged off-chain database to render the marketplace. Cost: a larger `Gig` account and length caps enforced at every write |
 | `update_gig` restricted to `Draft` | Once a gig is published, freelancers may have evaluated it; silently mutating budget or deadline after publication would let a client bait-and-switch |
 
@@ -382,17 +439,17 @@ initialize_profile (authority signs)
       ▼
 UserProfile { all counters = 0 }
       │
-      ├──► submit_rating (client signs, job_id + score 1-5 + review_hash)
+      ├──► submit_rating (client signs + escrow_authority PDA co-signs via CPI, job_id + score 1-5 + review_hash)
       │        └──► Rating PDA created (job_id-keyed, immutable)
       │        └──► freelancer_profile.rating_sum/rating_count/average_rating/
       │              reputation_score updated in the same instruction
       │
-      ├──► update_completion (REPUTATION_AUTHORITY signs, successful + earnings)
+      ├──► update_completion (escrow_authority PDA signs via CPI, successful + earnings)
       │        └──► completed_jobs += 1; successful_jobs or cancelled_jobs += 1;
       │              total_earnings += earnings (only if successful);
       │              reputation_score recomputed
       │
-      ├──► award_badge (REPUTATION_AUTHORITY signs, badge_type + metadata)
+      ├──► award_badge (permissionless; anyone pays rent)
       │        └──► is_eligible_for_badge(profile, badge_type) checked
       │        └──► Badge PDA created (profile + badge_type-keyed, one per type)
       │
@@ -429,18 +486,17 @@ Unlike Escrow's `Gig`/`Milestone`, `UserProfile` has no discrete status enum —
 
 Event coverage is verified in `tests/events.rs` (10 tests) — every emitting instruction's event fields are asserted against the instruction's actual effects.
 
-## 18. Future CPI Compatibility
+## 18. Escrow → Reputation CPI
 
-`update_completion` and `award_badge` are gated by `#[account(address = REPUTATION_AUTHORITY)]` — a single hardcoded pubkey (`programs/reputation/src/constants.rs`) acting as a trusted off-chain (or, later, on-chain) caller. This is a deliberate MVP simplification, documented in the source:
+Reputation updates only after Escrow confirms a payment has actually settled — never on gig creation, funding, delivery, or cancellation. Escrow is the source of truth for *successful payment*; Reputation is the source of truth for *trust*. Concretely:
 
-```rust
-/// Signer authorized to record job completions until the Escrow Program
-/// can invoke `update_completion` directly via CPI. Swapping this for a
-/// CPI-only check later does not require any account layout changes.
-pub const REPUTATION_AUTHORITY: Pubkey = pubkey!("vo18wuiY77EZa16yYKRdAjp2mj3g6GCvMHH8wkn6LAz");
-```
+- `update_completion` and `submit_rating` no longer accept a hardcoded authority pubkey. They require a `Signer` at seeds `[b"escrow_authority"]` derived under `ESCROW_PROGRAM_ID` (`seeds::program = ESCROW_PROGRAM_ID`, mirroring the same pattern Escrow already uses to call Gig — see §5.4). A PDA has no private key, so the only way to produce a valid signature for it is `invoke_signed` from inside the Escrow program itself. A direct top-level call, or a call "signed" by any real keypair, fails Anchor's seeds constraint before the handler ever runs.
+- Escrow exposes two new instructions that perform this CPI:
+  - **`settle_reputation`** (permissionless) — callable once `vault.active_milestone >= vault.milestone_count` (every milestone released). It CPIs `update_completion(successful: true, earnings: vault.total_released)` and sets `vault.reputation_synced = true`, a new `EscrowVault` field that makes the CPI (and its earnings credit) fire at most once per gig. This is decoupled from `approve_milestone`/`full_timeout_release` deliberately: bundling it into those instructions would force every escrow settlement — including gigs whose freelancer never initialized a reputation profile — to carry reputation accounts, breaking the programs' independent-deployment guarantee. `settle_reputation` is an additive step a freelancer or indexer calls after settlement, gated purely by Escrow's own vault state.
+  - **`rate_freelancer`** (client-signed) — callable once `gig.status == Completed`. It CPIs `submit_rating(job_id: gig.id, score, review_hash)` with `escrow_authority` as the trusted attester that `gig.id` really is a completed job between this client and freelancer. Reputation still enforces the one-rating-per-job (PDA-keyed by `job_id`) and valid-range rules itself.
+- `award_badge` is permissionless (no signer requirement beyond the rent payer): eligibility is recomputed from the profile's own public, already-verified fields (`is_eligible_for_badge`), so there is no privileged data to gate — anyone (a freelancer, a client, an indexer) can trigger it once eligible, and the badge-type-keyed PDA prevents duplicates regardless of caller.
 
-Because the account constraint is a simple `address = REPUTATION_AUTHORITY` check on a `Signer`, migrating to a CPI-only model later (Escrow's `approve_milestone` invoking `update_completion` via CPI, signed by an Escrow-owned PDA) requires changing only that one constraint — no change to `UserProfile`, `Rating`, or `Badge` account layouts, and no change to `submit_rating` (already permissionless-by-the-client) or `award_badge`'s eligibility logic. This is why the account model was designed with fixed, independently-addressed PDAs rather than embedding completion data inside an Escrow-owned account: the two programs can compose later without either being redesigned. See §21.4 for the security implications of this trust assumption in its current, pre-CPI form.
+This mirrors the same trust pattern already used for Escrow → Gig: a hardcoded `ESCROW_PROGRAM_ID` constant in `programs/reputation/src/constants.rs` (no crate dependency on `escrow`, avoiding a circular build dependency) plus a fixed `ESCROW_AUTHORITY_SEED`. See SECURITY.md for the full threat model and attack-by-attack verification.
 
 ## 19. Design Rationale Summary
 
@@ -449,6 +505,7 @@ Because the account constraint is a simple `address = REPUTATION_AUTHORITY` chec
 | `Rating` PDA seeded by `job_id` alone (not `job_id + client`) | The seed itself is the duplicate-submission guard — a second `submit_rating` for the same job fails at `init`, with no separate "already rated" existence check needed |
 | `average_rating` recomputed from `rating_sum`/`rating_count` every time, not blended incrementally | Guarantees the stored average is always the exact mean of every rating ever submitted, regardless of submission order — no floating-point or rounding drift accumulates |
 | `reputation_score` is a pure function of stored counters, recomputed on every mutation | Anyone can independently recompute and verify a profile's score from its public fields alone; there is no code path where a score is set directly, so it cannot silently diverge from the data that justifies it |
-| Badge eligibility is deterministic where possible (`FirstGig`, `*CompletedJobs`, `FiveStarPerformer`, `TopRated`), authority-attested otherwise (`TrustedFreelancer`, `FastDeliverer`) | Some signals (delivery timing, external endorsements) aren't tracked on-chain by this program; rather than fabricate an on-chain proxy for them, those two badge types are explicitly documented as authority-attested, while duplicate-award protection (one PDA per type) still applies uniformly to all seven types |
-| `REPUTATION_AUTHORITY` is a single hardcoded pubkey today, not a CPI check | Lets `update_completion`/`award_badge` ship and be fully tested before Escrow's CPI surface to this program is built; the account-layout compatibility is preserved for that migration (§18) |
+| Badge eligibility is deterministic where possible (`FirstGig`, `*CompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer`/`FastDeliverer` are always ineligible for now | Some signals (delivery timing, external endorsements) aren't tracked on-chain by this program. Since `award_badge` is permissionless, eligibility can never depend on anything the caller merely asserts — so these two badge types return `false` until a real on-chain signal backs them, rather than being awardable on a bare claim |
+| `update_completion`/`submit_rating` require a `seeds::program`-pinned `escrow_authority` PDA signer, not a hardcoded pubkey | The only account that can ever sign for that PDA is Escrow's own `invoke_signed` CPI — closing the gap where a single leaked/rotated keypair could forge job completions or ratings (§18, SECURITY.md) |
+| `settle_reputation` is its own escrow instruction, not folded into `approve_milestone`/`full_timeout_release` | Keeps reputation genuinely optional per-gig instead of a hard dependency of every settlement path, preserving independent deployability; gated by `vault.reputation_synced` so it can still only ever fire once |
 | Reputation is a separate program from Escrow | See §3 — isolates the audited payment path from reputation-scoring logic that will change more often |

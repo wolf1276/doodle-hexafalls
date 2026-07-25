@@ -1,8 +1,49 @@
 # Changelog
 
-All notable changes to the Escrow and Reputation programs and their documentation are recorded here.
+All notable changes to the Gig, Escrow, and Reputation programs and their documentation are recorded here.
 
-Entries below the current one are kept as written at the time of release. Where an older entry says "production-ready", read it as "implementation, tests, and internal audit complete" — neither program is deployed, and neither has had an external audit. Test counts in older entries predate later suite growth; see [TESTING.md](./TESTING.md) for current figures.
+Entries below the current one are kept as written at the time of release. Where an older entry says "production-ready", read it as "implementation, tests, and internal audit complete" — no program is deployed, and none has had an external audit. Test counts in older entries predate later suite growth; see [TESTING.md](./TESTING.md) for current figures.
+
+## [Unreleased — Escrow/Reputation CPI]
+
+Wires the Escrow and Reputation programs together via secure CPI, closing the trust gap left by the previous `REPUTATION_AUTHORITY` hardcoded-pubkey design: reputation now updates only after Escrow itself confirms a payment has settled, signed by the same kind of `escrow_authority` PDA already used for the Escrow → Gig CPI.
+
+### Added
+- Two new Escrow instructions: `settle_reputation` (permissionless, callable once a gig's vault is fully released, at most once per gig) and `rate_freelancer` (client-signed, callable once a gig is `Completed`). Both CPI into the Reputation program, signed by Escrow's own `escrow_authority` PDA.
+- `EscrowVault.reputation_synced: bool` — prevents `settle_reputation`'s CPI (and its earnings credit) from ever firing more than once per gig.
+- `programs/escrow/tests/reputation_settlement.rs` — 10 new cross-program integration tests (all three programs deployed together in one `litesvm` instance) covering the real settlement/rating CPI flow, duplicate-settlement/duplicate-rating rejection, premature-settlement rejection, and direct-call/forged-signer rejection.
+- `programs/reputation/tests/pda_security.rs` gains direct CPI-forgery tests: an attacker's real (non-PDA) keypair standing in for `escrow_authority` is rejected for both `update_completion` and `submit_rating`.
+
+### Changed
+- `update_completion` and `submit_rating` no longer accept `REPUTATION_AUTHORITY`, a single hardcoded pubkey. They now require an `escrow_authority: Signer<'info>` constrained to `seeds = [ESCROW_AUTHORITY_SEED], bump, seeds::program = ESCROW_PROGRAM_ID` — the same pattern Gig already uses to trust Escrow. A PDA has no private key, so only Escrow's own `invoke_signed` CPI can satisfy it; `REPUTATION_AUTHORITY` and its keypair fixture are removed.
+- `award_badge` is now permissionless (`payer` replaces the `authority` field, which no longer requires any signer beyond footing rent) — eligibility is recomputed from the profile's own public fields on every call, so there was no privileged data left to gate.
+- `is_eligible_for_badge` returns `false` (not `true`) for `TrustedFreelancer`/`FastDeliverer`: since award is now permissionless, these two badge types — which have no on-chain signal backing them — are simply not awardable yet, rather than being awardable on a bare unverified claim.
+- `fund_milestone`'s `gig: Account<'info, Gig>` is now `Box<Account<'info, Gig>>`, trimming its `try_accounts` stack frame back under the SBF 4096-byte limit after the new `reputation` crate dependency pushed it 8 bytes over.
+
+### Removed
+- `REPUTATION_AUTHORITY` constant and its keypair test fixture (`programs/reputation/tests/fixtures/authority-keypair.json`).
+- Reputation's `math.rs`, `completion_updates.rs`, `rating_submission.rs`, `rating_validation.rs`, `regressions.rs`, `reputation_algorithm.rs`, `state_invariants.rs`, `badge_system.rs` test modules — their positive-path coverage assumed direct, non-CPI calls to `update_completion`/`submit_rating`, which the security fix deliberately makes impossible; that coverage now lives in `programs/escrow/tests/reputation_settlement.rs`, exercising the real CPI path instead. Reputation's own suite keeps what remains validly testable in isolation (profile creation/authorization, PDA/CPI-forgery security, pure-function unit tests in `utils.rs`).
+
+## [Unreleased — Gig/Escrow Program Split]
+
+### Added
+- New `programs/gig` program (`declare_id!("9LpGZY8p8dYfYdWm5D9MuvGXh9VXdF8DqEEAmdNZ92Na")`), extracted from the previously-merged Escrow program. Owns `Gig` account, job metadata, and lifecycle only: `initialize_gig`, `update_gig`, `publish_gig`, `assign_freelancer`, `complete_gig`, `archive_gig`, `cancel_gig`.
+- Three CPI-only Gig instructions — `mark_in_progress`, `mark_completed_by_escrow`, `mark_cancelled_by_escrow` — callable exclusively by Escrow, authorized via an `escrow_authority` signer PDA constrained by `seeds::program = ESCROW_PROGRAM_ID`. The Solana runtime itself guarantees only the Escrow program can produce a valid signature for that PDA; see [ARCHITECTURE.md §5.3–5.4](./ARCHITECTURE.md) and [SECURITY.md §4a](./SECURITY.md).
+- `GigStatus` gains an `InProgress` variant (`Draft → Published → Assigned → InProgress → Completed`, `Cancelled`/`Archived` as before), entered only via Escrow's `mark_in_progress` CPI on first milestone funding — never client-callable.
+- `programs/gig/tests/` — new 68-test litesvm suite across 8 modules, including `cpi_authorization.rs` proving the three CPI-only instructions reject any direct, non-CPI caller.
+- `programs/escrow/tests/gig_escrow_integration.rs` — 11 new cross-program integration tests covering the full create→publish→assign→fund→InProgress→complete/cancel flow across both deployed programs in one `litesvm` instance, plus unauthorized-CPI and wrong-PDA rejections.
+
+### Changed
+- `EscrowVault` gains `milestone_count`/`active_milestone` (`u32` each), moved off `Gig` — these are payment-lifecycle counters, not job metadata, so Escrow now owns them directly instead of needing a CPI just to keep a counter in sync.
+- `Gig` account (owned by `programs/gig`) drops `milestone_count`/`active_milestone` accordingly.
+- `EscrowError` trimmed to escrow-only concerns (Escrow no longer defines gig-metadata errors like `TitleTooLong`/`NotDraftStatus`; those live in Gig's own `GigError`); new `GigNotFundable` variant replaces the old `InvalidStatus`/`NotAssignedStatus` checks on `create_milestone`/`fund_milestone`, which now accept `Assigned` or `InProgress`.
+- `cancel_before_funding` no longer mutates `Gig.status` directly (it can't — it doesn't own that account); it now CPIs into `mark_cancelled_by_escrow`.
+- `approve_milestone` / `full_timeout_release` no longer set `Gig.status = Completed` directly on the final milestone; they now CPI into `mark_completed_by_escrow`.
+- `Anchor.toml` gains a `[programs.localnet] gig` entry; the `[scripts] test` command now runs gig → escrow → reputation in sequence.
+- Escrow's `Cargo.toml` gains `gig = { path = "../gig", features = ["cpi"] }`; the workspace `Cargo.toml` adds `programs/gig` as a member.
+
+### Why
+See [ARCHITECTURE.md §2](./ARCHITECTURE.md) for the full rationale: smaller per-program attack surface, independent deployability of job-listing logic vs. audited payment-custody logic, single source of truth for gig metadata (Escrow never duplicates it, only reads a `Gig` account it doesn't own), and least-privilege CPI (Escrow can trigger exactly three narrow transitions, nothing else).
 
 ## [Unreleased — Escrow Gig Lifecycle]
 
