@@ -109,6 +109,27 @@ Reputation's tests share the same `litesvm` approach as Gig's and Escrow's. Shar
 
 ---
 
+## Achievement Program
+
+| Module | Tests | Coverage |
+|---|---|---|
+| `tests/claim_achievement.rs` | 8 | Eligibility, forged-account rejection, duplicate-claim/replay rejection, and PDA/signer validation for `claim_achievement`, plus config-account seeding. |
+
+| Test | Verifies |
+|---|---|
+| `ineligible_user_rejected` | No `Badge` PDA exists for the claimer → transaction fails before reaching the mint CPI. |
+| `forged_badge_rejected` | A non-PDA account substituted for `badge` fails Anchor's seeds/owner check. |
+| `forged_profile_rejected` | A different (real, but unrelated) profile PDA substituted for `profile` fails the seeds check derived from `claimer`. |
+| `invalid_signer_rejected` | A transaction naming the real owner as `claimer` but signed by a different keypair is rejected at signature verification. |
+| `invalid_pda_rejected` | A non-derived account substituted for the `achievement` PDA fails the `init` seeds constraint. |
+| `duplicate_claim_rejected` | A pre-seeded, already-`claimed` `Achievement` account causes a second claim attempt to fail at `init` (account already in use); the stored `claimed` flag is unaffected. |
+| `eligible_claim_reaches_mpl_core_cpi` | A fully valid claim (real profile, real earned badge, correct signer, correct PDAs) passes every check this program owns and fails only because the real Metaplex Core program isn't deployed in this offline sandbox — see the note below. |
+| `config_seeded_correctly` | `AchievementConfig`'s `admin`/`collection` fields deserialize as written. |
+
+**Known gap:** this sandbox has no network access to fetch the deployed Metaplex Core program binary, so no test here executes a real mint. Every check the Achievement program itself is responsible for (eligibility, ownership, signer, PDA identity, duplicate-claim) is verified above, since Anchor's account-constraint layer runs and fails/passes before the handler ever reaches the mpl-core CPI. `init_collection`'s own CPI, and full post-mint state (asset owner, collection membership, on-chain metadata), should be verified against a real `mpl-core` deployment (localnet/devnet) before treating this program as audited to the same standard as Gig/Escrow/Reputation (see SECURITY.md §27).
+
+---
+
 # Coverage Summary
 
 | Program | Integration | Unit | Modules |
@@ -116,6 +137,7 @@ Reputation's tests share the same `litesvm` approach as Gig's and Escrow's. Shar
 | gig | 68 | 0 | 8 |
 | escrow | 144 | 4 | 13 |
 | reputation | 26 | 10 | 4 |
-| **Total** | **238** | **14** | **25** |
+| achievement | 8 | 0 | 1 |
+| **Total** | **246** | **14** | **26** |
 
 `cargo test` (via the `[scripts] test` entry in `Anchor.toml`, which runs gig → escrow → reputation in order) runs all **252** tests with **0 failures**. Escrow's `reputation_settlement.rs` module is counted under escrow (it deploys and exercises all three programs together) and is where Reputation's completion/rating/badge business logic is actually verified end-to-end, now that those instructions are CPI-only. There are no benchmark or performance suites in the repository. Combined with the completed internal security audit ([SECURITY.md](./SECURITY.md)), all three programs' implementation, test suite, and audit are complete.

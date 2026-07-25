@@ -199,6 +199,8 @@ pub escrow_authority: Signer<'info>,
 
 `seeds::program` tells Anchor (and, underneath it, the Solana runtime) that this PDA must have been derived — and *signed for* via `invoke_signed` — by the program whose ID is `ESCROW_PROGRAM_ID`. The runtime itself enforces this: a program can only produce a valid PDA signature for seeds derived under *its own* program ID, so no program other than Escrow can ever construct a valid signer for `[b"escrow_authority"]` under `ESCROW_PROGRAM_ID`. This is the entire trust mechanism — Gig does not maintain an allow-list, does not check `instruction_sysvar` introspection, and does not require any registration step; the cryptographic guarantee is structural. See SECURITY.md for the corresponding negative tests (calling these instructions directly, or from a forged signer, is rejected).
 
+`ESCROW_PROGRAM_ID` is a compile-time constant, deliberately duplicated (not shared via a mutable registry) in both `gig` and `reputation` — see [SECURITY.md §4c](./SECURITY.md#4c-escrow-program-id-trust-assumption-operational) for why, how consistency is enforced at build time, and [docs/runbooks/escrow-redeploy.md](./docs/runbooks/escrow-redeploy.md) for the redeploy procedure.
+
 ## 6. Event Architecture
 
 Every state-changing instruction emits a typed Anchor event, giving off-chain indexers (e.g. `services/reputation-indexer`) a complete, replayable log without needing to poll account state. Events are now split across two programs' `events.rs`:
@@ -509,3 +511,24 @@ This mirrors the same trust pattern already used for Escrow → Gig: a hardcoded
 | `update_completion`/`submit_rating` require a `seeds::program`-pinned `escrow_authority` PDA signer, not a hardcoded pubkey | The only account that can ever sign for that PDA is Escrow's own `invoke_signed` CPI — closing the gap where a single leaked/rotated keypair could forge job completions or ratings (§18, SECURITY.md) |
 | `settle_reputation` is its own escrow instruction, not folded into `approve_milestone`/`full_timeout_release` | Keeps reputation genuinely optional per-gig instead of a hard dependency of every settlement path, preserving independent deployability; gated by `vault.reputation_synced` so it can still only ever fire once |
 | Reputation is a separate program from Escrow | See §3 — isolates the audited payment path from reputation-scoring logic that will change more often |
+| NFT minting lives in its own `achievement` program, triggered by the user, never by escrow settlement | Metaplex Core CPI accounts (collection, asset, mpl-core program) have no reason to appear in the money path; a bug or upgrade in NFT-minting logic can never block or slow down a milestone release |
+| Achievement reuses `reputation::BadgeType` instead of declaring its own badge enum | The task badges *are* an eligibility calculation, which is Reputation's job; a second enum plus a second eligibility check would be duplicated state that could drift from Reputation's own rules |
+| `claim_achievement` proves eligibility by re-deriving Reputation's own `Badge` PDA (`seeds::program = reputation::ID`), not by re-running eligibility logic | The PDA's mere existence already encodes "eligibility was checked once, by the program that owns that logic" — re-checking it in Achievement would be the duplicated-logic anti-pattern this split is meant to avoid |
+
+## 20. Achievement Program
+
+**Path:** `programs/achievement` (Anchor, `declare_id!("GV8Z39NBK7qrojXCfnnwLTXpqsLoCW6sy9cLHGYjtrv9")`).
+
+Achievement is a fourth independently-deployable program, added after Gig/Escrow/Reputation were already stable. It sits downstream of Reputation only:
+
+```
+Escrow → Reputation (award_badge) → Achievement (claim_achievement) → Metaplex Core
+```
+
+It never appears in the Escrow → Gig or Escrow → Reputation CPI chain, and it makes no CPI into either Gig or Escrow — it only reads Reputation's `UserProfile` and `Badge` accounts directly (by re-deriving their PDAs under `reputation::ID`), and it makes exactly one outbound CPI, to the Metaplex Core program, to actually mint.
+
+**Why claim-based instead of auto-minted on badge award.** `award_badge` is permissionless and cheap by design (§ Reputation Program, README.md) — anyone can trigger it once a profile's own public fields clear the threshold. Auto-minting an NFT at that same moment would tie Metaplex Core's CPI surface, rent cost, and failure modes to an instruction Reputation needs to stay lightweight and callable by anyone, including indexers. Splitting the mint into a separate, user-initiated `claim_achievement` call means: a badge being earned and an NFT existing are two independently-failable events, the user (not an indexer or a bot calling `award_badge`) pays the NFT's rent, and Reputation's hot path never touches an external program it doesn't control the deployment of.
+
+**Why Reputation stays independent of Metaplex.** Reputation's account layout, CPI surface, and audit boundary were fixed before Achievement existed. Adding a Metaplex Core dependency to Reputation would mean every future Reputation change also has to reason about Metaplex Core's plugin/collection model — the same "isolate the audited path from logic that changes more often" argument as §3, applied one level further down the chain. Achievement absorbs that dependency instead, and if Metaplex Core's CPI interface changes, only Achievement needs to be redeployed.
+
+See README.md's [Achievement Program](./README.md#achievement-program) section for the instruction/state reference and SECURITY.md's [Achievement Program Security Model](./SECURITY.md#achievement-program-security-model) for the threat model.

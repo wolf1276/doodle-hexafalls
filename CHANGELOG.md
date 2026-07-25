@@ -4,6 +4,40 @@ All notable changes to the Gig, Escrow, and Reputation programs and their docume
 
 Entries below the current one are kept as written at the time of release. Where an older entry says "production-ready", read it as "implementation, tests, and internal audit complete" — no program is deployed, and none has had an external audit. Test counts in older entries predate later suite growth; see [TESTING.md](./TESTING.md) for current figures.
 
+## [Unreleased — Achievement program]
+
+Adds a fourth, independently-deployable program that mints NFT credentials for badges the Reputation program has already awarded. Does not modify Gig, Escrow, or Reputation's existing behavior, state, or CPI surface.
+
+### Added
+- `programs/achievement` (Anchor, `declare_id!("GV8Z39NBK7qrojXCfnnwLTXpqsLoCW6sy9cLHGYjtrv9")`) — new workspace member.
+  - `init_collection(name, uri)` — one-time admin setup creating the shared Metaplex Core collection, with a program PDA (`config`) as its update authority.
+  - `claim_achievement(badge_type)` — user-signed instruction that re-derives the caller's `UserProfile`/`Badge` PDAs from `programs/reputation` as eligibility proof, then mints a Metaplex Core asset via CPI into the shared collection.
+  - `AchievementConfig` (singleton) and `Achievement` (one PDA per `(owner, badge_type)`) account types.
+  - `AchievementClaimed` event.
+  - Reuses `reputation::BadgeType` rather than declaring a parallel enum — badge eligibility logic stays exclusively in `programs/reputation`.
+- `programs/achievement/tests/claim_achievement.rs` (8 tests) — eligibility, forged-profile/forged-badge rejection, invalid-signer/invalid-PDA rejection, and duplicate-claim/replay rejection.
+- SECURITY.md §27 "Achievement Program Security Model".
+- ARCHITECTURE.md §20 "Achievement Program".
+- README.md "Achievement Program" section and Implementation Matrix rows.
+- TESTING.md "Achievement Program" section.
+
+### Notes
+- NFT minting is never triggered by escrow settlement — `claim_achievement` is always a separate, user-initiated transaction. Settlement's CPI surface is unchanged (still ends at Reputation, §18).
+- This offline development sandbox has no network access to the deployed Metaplex Core program binary, so the test suite verifies every check Achievement itself owns (all of which run before the handler reaches the mpl-core CPI) but does not execute a real mint end-to-end. See TESTING.md's "Known gap" note before treating this program as audited to the same standard as Gig/Escrow/Reputation.
+
+## [Unreleased — ESCROW_PROGRAM_ID consistency guard]
+
+Documents and enforces the intentional duplication of `ESCROW_PROGRAM_ID` across `gig` and `reputation`, without introducing a mutable on-chain registry (the compile-time trust model is preserved by design — see SECURITY.md §4c).
+
+### Added
+- Compile-time consistency check (`const _: () = assert!(...)`, `programs/escrow/src/lib.rs`) that fails the build if `gig::ESCROW_PROGRAM_ID` or `reputation::ESCROW_PROGRAM_ID` ever drifts from Escrow's own `declare_id!`.
+- `docs/runbooks/escrow-redeploy.md` — step-by-step runbook for redeploying Escrow to a new program ID, including updating both dependent constants and rebuilding/redeploying `gig` and `reputation`.
+- SECURITY.md §4c "Escrow Program ID Trust Assumption (Operational)" — documents why the duplication is intentional and what the compile-time guard covers.
+
+### Changed
+- `programs/gig/src/constants.rs` and `programs/reputation/src/constants.rs` — `ESCROW_PROGRAM_ID` doc comments now point to SECURITY.md §4c and the redeploy runbook instead of a bare `ponytail:` note.
+- README.md / ARCHITECTURE.md cross-reference the new SECURITY.md section and runbook wherever `ESCROW_PROGRAM_ID` is discussed.
+
 ## [Unreleased — Escrow/Reputation CPI]
 
 Wires the Escrow and Reputation programs together via secure CPI, closing the trust gap left by the previous `REPUTATION_AUTHORITY` hardcoded-pubkey design: reputation now updates only after Escrow itself confirms a payment has settled, signed by the same kind of `escrow_authority` PDA already used for the Escrow → Gig CPI.

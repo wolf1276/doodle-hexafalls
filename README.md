@@ -8,7 +8,7 @@
 
 **A non-custodial, milestone-based freelance payment protocol on Solana.** Client funds are held by program-derived vaults with no private key; payouts follow fixed on-chain rules; reputation is a deterministic function of on-chain history that anyone can recompute.
 
-> **Maturity:** the three on-chain programs (`gig`, `escrow`, `reputation`) are implemented, internally audited, and covered by 351 tests. Nothing is deployed to devnet or mainnet yet, the dispute program is an empty scaffold, and the frontend is a landing-page shell. See [Implementation Matrix](#implementation-matrix) for exact per-component status.
+> **Maturity:** four on-chain programs (`gig`, `escrow`, `reputation`, `achievement`) are implemented and covered by 359 tests; `gig`/`escrow`/`reputation` are internally audited, `achievement` has not yet had a full audit pass. Nothing is deployed to devnet or mainnet yet, the dispute program is an empty scaffold, and the frontend is a landing-page shell. See [Implementation Matrix](#implementation-matrix) for exact per-component status.
 
 ---
 
@@ -22,6 +22,7 @@
 - [Gig Program](#gig-program)
 - [Escrow Program](#escrow-program)
 - [Reputation Program](#reputation-program)
+- [Achievement Program](#achievement-program)
 - [Account Model](#account-model)
 - [PDA Architecture](#pda-architecture)
 - [Instruction Reference](#instruction-reference)
@@ -47,11 +48,12 @@
 - The **gig program** owns the job. A client creates, updates, publishes, assigns, and (for gigs with no escrow activity) completes, archives, or cancels a `Gig` PDA. This used to live inside the escrow program; it was split out because gig metadata churn (title edits, category taxonomy, draft/publish workflow) has nothing to do with the custody trust boundary, and putting both in one program meant every metadata tweak sat inside the code that also moves money.
 - The **escrow program** owns the money. A client funds a milestone into a vault whose SPL token authority is a PDA — an address with no private key, signable only by the escrow program itself via `invoke_signed`. Funds leave that vault through exactly three code paths: client approval, a 20% release 72 hours after delivery, or a full release 7 days after delivery. There is no admin withdrawal instruction. Escrow still needs to move the gig forward when money moves (funding starts work, a final release finishes it), so it does that over CPI into the gig program, signed by escrow's own `escrow_authority` PDA — the gig program only accepts that signature from the real escrow program, never from an arbitrary caller.
 - The **reputation program** owns the record. Job counts, earnings, ratings, and badges are stored per-authority in PDAs, and `reputation_score` is recomputed from those stored counters on every mutation by a pure function — never accepted as instruction input. Anyone can re-derive the score from public account data and check it.
+- The **achievement program** owns NFT credentials. It reads (never writes) a `Badge` PDA the reputation program already created and mints a Metaplex Core NFT into a user's wallet on request — never automatically, never during settlement.
 - A **dispute program** is scaffolded but not implemented. Today the timeout releases, not a jury, are the freelancer's protection against a silent client.
 
 **Core principles.** Non-custodial by construction, deterministic and recomputable, one responsibility per program, no unchecked arithmetic, no trusted mapping an admin can rewrite.
 
-**Architecture.** Four Anchor programs. Gig and Escrow are connected by one narrow CPI edge — escrow calls into gig to advance `GigStatus` when money moves — but share no accounts and gig never calls back into escrow. Escrow's other outbound CPI is to the SPL Token program. Reputation and Dispute perform no CPI at all and are untouched by the split.
+**Architecture.** Five Anchor programs. Gig and Escrow are connected by one narrow CPI edge — escrow calls into gig to advance `GigStatus` when money moves — but share no accounts and gig never calls back into escrow. Escrow's other outbound CPI is to the SPL Token program. Achievement reads Reputation's `Badge`/`UserProfile` PDAs directly (no CPI) and calls out to Metaplex Core. Reputation and Dispute perform no CPI at all and are untouched by the split.
 
 **Maturity.** Program logic: complete and internally audited. Deployment: none. Client integration: none. See the [Implementation Matrix](#implementation-matrix).
 
@@ -115,6 +117,7 @@ Status derived from repository contents only.
 | Gig program | `programs/gig` | Job/gig metadata and lifecycle | **Complete, internally audited** | 7 instructions (4 client + 3 CPI-only), 1 account type, 8 events, 15 error variants, 68 tests |
 | Escrow program | `programs/escrow` | Milestone escrow, funding, and release | **Complete, internally audited** | 9 instructions, 2 account types, 7 events, 11 error variants, 148 tests |
 | Reputation program | `programs/reputation` | Profiles, ratings, badges, deterministic scoring | **Complete, internally audited** | 5 instructions, 3 account types, 5 events (4 emitted), 11 error variants, 36 tests |
+| Achievement program | `programs/achievement` | User-claimed NFT badges via Metaplex Core | **Implemented** | 2 instructions, 2 account types, 1 event, 4 error variants, 8 tests (see [Achievement Program](#achievement-program)) |
 | Dispute program | `programs/dispute` | Third-party resolution | **Not implemented** | Empty directory (`src/.gitkeep`), not a workspace member |
 | Escrow → Gig CPI | Cross-program status sync | `Assigned→InProgress`, `→Completed`, `→Cancelled` | **Implemented** | Signed by an `escrow_authority` PDA Gig verifies via `seeds::program`; see [ARCHITECTURE.md §5.3–5.4](./ARCHITECTURE.md) |
 | Escrow → Reputation CPI | `settle_reputation`, `rate_freelancer` | Trustless completion/rating recording after settlement | **Implemented** | `update_completion`/`submit_rating` require the same `escrow_authority` PDA pattern as the Gig CPI; see [ARCHITECTURE.md §18](./ARCHITECTURE.md#18-escrow--reputation-cpi) |
@@ -127,7 +130,8 @@ Status derived from repository contents only.
 | Deployment | `Anchor.toml` | — | **Localnet only** | Program IDs pinned under `[programs.localnet]`; cluster is `localnet` |
 | Documentation | `*.md`, `docs/` | Architecture, security, testing | **Complete for both programs** | See [Documentation Index](#documentation-index) |
 | External security audit | — | — | **Not performed** | Audits to date are internal, documented in `SECURITY.md` |
-| NFT rewards / governance | — | — | **Not implemented** | Described only as product vision in `docs/details.md` |
+| NFT rewards | `programs/achievement` | Metaplex Core NFTs for earned badges | **Implemented** | See [Achievement Program](#achievement-program) |
+| Governance | — | — | **Not implemented** | Described only as product vision in `docs/details.md` |
 
 ---
 
@@ -238,7 +242,7 @@ GigStatus { Draft, Published, Assigned, InProgress, Completed, Cancelled, Archiv
 | `MIN_DEADLINE_SECS` | 86 400 s | A gig deadline must be strictly more than 1 day out |
 | `MAX_TITLE_LEN` / `MAX_DESCRIPTION_LEN` / `MAX_SKILLS_LEN` / `MAX_CATEGORY_LEN` | 100 / 500 / 200 / 50 | Input length caps matching account space |
 | `ESCROW_AUTHORITY_SEED` | `b"escrow_authority"` | Seed the three CPI-only instructions require escrow's signer PDA to match |
-| `ESCROW_PROGRAM_ID` | `FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS` | Hardcoded (not a crate dependency) so gig can verify the CPI caller without depending on the escrow crate |
+| `ESCROW_PROGRAM_ID` | `FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS` | Hardcoded (not a crate dependency) so gig can verify the CPI caller without depending on the escrow crate. Same value duplicated in `reputation`; consistency with escrow's own `declare_id!` is enforced by a compile-time assertion in `programs/escrow/src/lib.rs` — see [SECURITY.md §4c](./SECURITY.md#4c-escrow-program-id-trust-assumption-operational) and [docs/runbooks/escrow-redeploy.md](./docs/runbooks/escrow-redeploy.md) |
 
 ### State machine
 
@@ -447,6 +451,49 @@ Several are reserved rather than raised, because the corresponding rule is enfor
 ### Escrow CPI
 
 `update_completion` and `submit_rating` require an `escrow_authority: Signer<'info>` constrained to `seeds = [ESCROW_AUTHORITY_SEED], bump, seeds::program = ESCROW_PROGRAM_ID` — the same pattern Gig uses to trust Escrow (§5.4 above). A PDA has no private key, so the only way to satisfy this is `invoke_signed` from Escrow's own executing code; see [ARCHITECTURE.md §18](./ARCHITECTURE.md#18-escrow--reputation-cpi). `get_profile` exists to expose `reputation_score` through CPI return data for on-chain consumers.
+
+---
+
+## Achievement Program
+
+**Path:** `programs/achievement` · **Program ID:** `GV8Z39NBK7qrojXCfnnwLTXpqsLoCW6sy9cLHGYjtrv9`
+
+### Purpose and boundaries
+
+Achievement owns exactly one thing: **minting an NFT for a badge the user has already earned.** It does not compute eligibility, store reputation counters, or run during escrow settlement — settlement stays exactly as lightweight as it was before this program existed. It reuses `reputation::BadgeType` rather than defining a parallel badge enum, so badge criteria live in exactly one place.
+
+```
+Escrow settles → Reputation records completion → award_badge() unlocks a Badge PDA
+                                                            │
+                                                            ▼
+                                        User calls achievement::claim_achievement()
+                                                            │
+                                                            ▼
+                                    Achievement re-derives the Badge PDA (proof of
+                                    eligibility) → Metaplex Core CPI mints the NFT
+```
+
+NFT minting is always a separate, user-initiated transaction — never a side effect of `approve_milestone`, `full_timeout_release`, or any other escrow instruction. This keeps the money path free of Metaplex's account/CPI surface and lets a user claim on their own schedule (or never).
+
+### State
+
+- `AchievementConfig` (singleton, seeds `[b"config"]`) — `admin`, `collection` (the shared Metaplex Core collection every achievement mints into), `bump`.
+- `Achievement` (seeds `[b"achievement", owner, badge_type]`) — `owner`, `badge_type`, `mint` (the minted asset's pubkey), `claimed`, `claimed_at`, `bump`. One PDA per `(owner, badge_type)`; `init` failing on a repeat call is the entire duplicate-claim/replay guard.
+
+### Instructions (2)
+
+- **`init_collection(name, uri)`** — one-time admin setup. Creates the shared Metaplex Core collection with `config` (a program PDA) as its update authority, so only a `claim_achievement` CPI signed by that same PDA can ever mint into it.
+- **`claim_achievement(badge_type)`** — re-derives the caller's `UserProfile` and `Badge` PDAs *from the reputation program* (`seeds::program = reputation::ID`). The `Badge` PDA existing at all is the eligibility proof — `award_badge` already checked the criteria before creating it, so Achievement never recomputes that logic. Mints a Metaplex Core asset owned by the claimer via CPI, signed by the `config` PDA as collection authority, then records `Achievement.mint` and emits `AchievementClaimed`.
+
+### Security posture
+
+- **Forged profile / forged badge** — both are re-derived by seeds under `seeds::program = reputation::ID`; a substituted account fails Anchor's seeds/owner check before the handler runs.
+- **Ineligible claim** — no `Badge` PDA exists for that `(owner, badge_type)`, so the account resolves to nothing and the transaction fails before any CPI.
+- **Duplicate claim / replay** — the `Achievement` PDA's `init` constraint rejects a second claim outright; there is no explicit "already claimed" check to bypass.
+- **Account substitution** — every account (`profile`, `badge`, `config`, `achievement`, `mpl_core_program`) is either a re-derived PDA or checked against a hardcoded/config-stored address.
+- **NFT provenance** — the shared collection's update authority is the `config` PDA, not a keypair; only this program's own `invoke_signed` CPI can mint into it, so an NFT with that collection can only ever originate from a legitimate `claim_achievement` call.
+
+See [SECURITY.md](./SECURITY.md#achievement-program-security-model) for the full threat-model writeup and [TESTING.md](./TESTING.md#achievement-program) for per-test coverage.
 
 ---
 
