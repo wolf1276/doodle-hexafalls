@@ -2,14 +2,14 @@ use anchor_lang::prelude::*;
 
 use crate::errors::EscrowError;
 use crate::events::GigCancelled;
-use crate::state::{Gig, Milestone, MilestoneStatus};
+use crate::state::{Gig, GigStatus, Milestone, MilestoneStatus};
 
 #[derive(Accounts)]
 pub struct CancelBeforeFunding<'info> {
     #[account(mut)]
     pub client: Signer<'info>,
 
-    #[account(has_one = client @ EscrowError::Unauthorized)]
+    #[account(mut, has_one = client @ EscrowError::Unauthorized)]
     pub gig: Account<'info, Gig>,
 
     #[account(
@@ -23,6 +23,8 @@ pub struct CancelBeforeFunding<'info> {
 
 /// Closes a milestone that was never funded, refunding rent to the client.
 pub fn handler(ctx: Context<CancelBeforeFunding>) -> Result<()> {
+    ctx.accounts.gig.status = GigStatus::Cancelled;
+
     emit!(GigCancelled {
         gig: ctx.accounts.gig.key(),
         milestone: ctx.accounts.milestone.key(),

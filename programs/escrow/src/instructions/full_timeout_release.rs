@@ -83,7 +83,7 @@ pub fn handler(ctx: Context<FullTimeoutRelease>) -> Result<()> {
     milestone.status = MilestoneStatus::Completed;
 
     let gig = &mut ctx.accounts.gig;
-    if gig.active_milestone + 1 >= gig.milestone_count {
+    if checked_add(gig.active_milestone as u64, 1)? as u32 >= gig.milestone_count {
         gig.status = GigStatus::Completed;
     } else {
         gig.active_milestone = checked_add(gig.active_milestone as u64, 1)? as u32;
