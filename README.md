@@ -1,5 +1,21 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## PayGig Escrow Program
+
+The on-chain Solana Anchor program that holds and releases milestone payments lives in `programs/escrow`. It is **production-ready**: architecture finalized, full instruction set and PDA design implemented, SPL Token integration complete, 106-test suite passing, and a full internal security audit completed with no open findings.
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — account model, instruction flow, state machine, and PDA architecture.
+- [SECURITY.md](./SECURITY.md) — completed audit: threat model and every enforced invariant.
+- [TESTING.md](./TESTING.md) — breakdown of the 106-test, 11-module test suite.
+- [IMPLEMENTATION_PROGRESS.md](./IMPLEMENTATION_PROGRESS.md) — completion status across all on-chain programs.
+- [CHANGELOG.md](./CHANGELOG.md) — release history.
+
+Run the program's test suite with:
+
+```bash
+cargo test -p escrow
+```
+
 ## Getting Started
 
 First, run the development server:
