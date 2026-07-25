@@ -59,3 +59,40 @@ pub struct GigCancelled {
     pub milestone: Pubkey,
     pub index: u32,
 }
+
+#[event]
+pub struct GigUpdated {
+    pub gig: Pubkey,
+    pub id: u64,
+    pub title: String,
+    pub description: String,
+    pub skills: String,
+    pub category: String,
+    pub budget: u64,
+    pub deadline: i64,
+}
+
+#[event]
+pub struct GigPublished {
+    pub gig: Pubkey,
+    pub id: u64,
+}
+
+#[event]
+pub struct FreelancerAssigned {
+    pub gig: Pubkey,
+    pub id: u64,
+    pub freelancer: Pubkey,
+}
+
+#[event]
+pub struct GigCompleted {
+    pub gig: Pubkey,
+    pub id: u64,
+}
+
+#[event]
+pub struct GigArchived {
+    pub gig: Pubkey,
+    pub id: u64,
+}

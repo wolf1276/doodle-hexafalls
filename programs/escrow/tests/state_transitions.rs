@@ -53,6 +53,7 @@ fn test_approve_before_funding() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -120,6 +121,7 @@ fn test_submit_before_funding() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let err = send(
@@ -450,6 +452,7 @@ fn test_cancel_twice() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let cancel_ix = ix_cancel_before_funding(&env.client.pubkey(), &gig, &milestone);
@@ -469,6 +472,7 @@ fn test_fund_zero_amount_milestone() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
 
     let (milestone, _) = milestone_pda(&gig, 0);
     let err = send(

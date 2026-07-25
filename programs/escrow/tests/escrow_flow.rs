@@ -15,20 +15,8 @@ struct Funded {
 }
 
 fn init_create_fund(env: &mut Env, gig_id: u64) -> Funded {
-    let (gig, _) = gig_pda(gig_id);
-    send(
-        &mut env.svm,
-        &env.payer,
-        &[ix_initialize_gig(
-            &env.client.pubkey(),
-            &env.freelancer.pubkey(),
-            &env.mint.pubkey(),
-            &gig,
-            gig_id,
-        )],
-        &[&env.payer, &env.client],
-    )
-    .unwrap();
+    let gig = init_gig(env, gig_id);
+    publish_and_assign(env, &gig);
 
     let (milestone, _) = milestone_pda(&gig, 0);
     send(
@@ -250,14 +238,8 @@ fn approve_before_submit_fails() {
 #[test]
 fn fund_with_wrong_mint_fails() {
     let mut env = setup();
-    let (gig, _) = gig_pda(7);
-    send(
-        &mut env.svm,
-        &env.payer,
-        &[ix_initialize_gig(&env.client.pubkey(), &env.freelancer.pubkey(), &env.mint.pubkey(), &gig, 7)],
-        &[&env.payer, &env.client],
-    )
-    .unwrap();
+    let gig = init_gig(&mut env, 7);
+    publish_and_assign(&mut env, &gig);
 
     let (milestone, _) = milestone_pda(&gig, 0);
     send(
@@ -304,14 +286,8 @@ fn fund_with_wrong_mint_fails() {
 #[test]
 fn cancel_before_funding_succeeds_and_double_cancel_fails() {
     let mut env = setup();
-    let (gig, _) = gig_pda(8);
-    send(
-        &mut env.svm,
-        &env.payer,
-        &[ix_initialize_gig(&env.client.pubkey(), &env.freelancer.pubkey(), &env.mint.pubkey(), &gig, 8)],
-        &[&env.payer, &env.client],
-    )
-    .unwrap();
+    let gig = init_gig(&mut env, 8);
+    publish_and_assign(&mut env, &gig);
 
     let (milestone, _) = milestone_pda(&gig, 0);
     send(

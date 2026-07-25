@@ -14,7 +14,7 @@ pub struct CreateMilestone<'info> {
     #[account(
         mut,
         has_one = client @ EscrowError::Unauthorized,
-        constraint = gig.status == GigStatus::Active @ EscrowError::InvalidStatus,
+        constraint = gig.status == GigStatus::Assigned @ EscrowError::InvalidStatus,
     )]
     pub gig: Account<'info, Gig>,
 

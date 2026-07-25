@@ -31,6 +31,7 @@ fn test_wrong_gig_pda() {
 fn test_wrong_milestone_pda() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let _real_milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (wrong_milestone, _) = milestone_pda(&gig, 999);
@@ -62,6 +63,7 @@ fn test_wrong_milestone_pda() {
 fn test_wrong_vault_pda() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let wrong_key = Pubkey::new_unique();
@@ -130,9 +132,11 @@ fn test_wrong_bump() {
 fn test_milestone_from_different_gig() {
     let mut env = setup();
     let gig_a = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig_a);
     let _milestone_a = create_milestone_for(&mut env, &gig_a, 0, STANDARD_AMOUNT);
 
     let gig_b = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig_b);
     let milestone_b = create_milestone_for(&mut env, &gig_b, 0, STANDARD_AMOUNT);
 
     let (vault_for_a, _) = vault_pda(&gig_a);
@@ -233,9 +237,101 @@ fn test_vault_from_different_gig_in_approve() {
 }
 
 #[test]
+fn test_wrong_gig_pda_on_publish() {
+    let mut env = setup();
+    let real_gig = init_gig(&mut env, next_id());
+    let (fake_gig, _) = gig_pda(next_id());
+
+    let err = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_publish_gig(&env.client.pubkey(), &fake_gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("0xbc4"), "Expected AccountNotInitialized, got: {err}");
+}
+
+#[test]
+fn test_wrong_gig_pda_on_assign() {
+    let mut env = setup();
+    let real_gig = init_gig(&mut env, next_id());
+    publish_gig(&mut env, &real_gig);
+    let (fake_gig, _) = gig_pda(next_id());
+
+    let err = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_assign_freelancer(&env.client.pubkey(), &env.freelancer.pubkey(), &fake_gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("0xbc4"), "Expected AccountNotInitialized, got: {err}");
+}
+
+#[test]
+fn test_wrong_gig_pda_on_complete() {
+    let mut env = setup();
+    let real_gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &real_gig);
+    let (fake_gig, _) = gig_pda(next_id());
+
+    let err = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_complete_gig(&env.client.pubkey(), &fake_gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("0xbc4"), "Expected AccountNotInitialized, got: {err}");
+}
+
+#[test]
+fn test_wrong_gig_pda_on_archive() {
+    let mut env = setup();
+    let real_gig = init_gig(&mut env, next_id());
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(&mut env, &real_gig);
+    assign_freelancer_to(&mut env, &real_gig, &freelancer);
+    complete_gig_for(&mut env, &real_gig);
+    let (fake_gig, _) = gig_pda(next_id());
+
+    let err = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_archive_gig(&env.client.pubkey(), &fake_gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("0xbc4"), "Expected AccountNotInitialized, got: {err}");
+}
+
+#[test]
+fn test_wrong_gig_pda_on_cancel() {
+    let mut env = setup();
+    let real_gig = init_gig(&mut env, next_id());
+    let (fake_gig, _) = gig_pda(next_id());
+
+    let err = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_cancel_gig(&env.client.pubkey(), &fake_gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("0xbc4"), "Expected AccountNotInitialized, got: {err}");
+}
+
+#[test]
 fn test_spoofed_pda_not_initialized() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let _real_milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (spoofed_milestone, _) = milestone_pda(&gig, 999);

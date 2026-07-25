@@ -31,6 +31,7 @@ fn test_milestone_amount_one() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, 1);
 
     let (vault, _) = vault_pda(&gig);
@@ -93,6 +94,7 @@ fn test_milestone_large_amount() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
     let amount = 10_000_000_000_000u64;
     let milestone = create_milestone_for(&mut env, &gig, 0, amount);
 
@@ -156,6 +158,7 @@ fn test_milestone_max_u64() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
 
     let (milestone, _) = milestone_pda(&gig, 0);
     send(
@@ -175,6 +178,7 @@ fn test_multiple_milestones_large_total() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
 
     let amt = u64::MAX / 3 + 1;
     let m0 = create_milestone_for(&mut env, &gig, 0, amt);
@@ -265,6 +269,7 @@ fn test_partial_timeout_percent_of_max() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
     let amount = u64::MAX / 1000;
     let milestone = create_milestone_for(&mut env, &gig, 0, amount);
 
@@ -334,6 +339,7 @@ fn test_exact_accounting_after_many_operations() {
     let mut env = setup();
     let gig_id = next_id();
     let gig = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig);
 
     let amounts = [100u64, 200, 300, 400, 500];
     let mut milestones = Vec::new();

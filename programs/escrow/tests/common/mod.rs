@@ -19,6 +19,13 @@ pub use escrow::errors::EscrowError;
 pub const USDC_DECIMALS: u8 = 6;
 pub const STANDARD_AMOUNT: u64 = 1_000_000;
 
+pub const TEST_TITLE: &str = "Test Gig";
+pub const TEST_DESCRIPTION: &str = "A test gig for integration testing";
+pub const TEST_SKILLS: &str = "Rust,Solana";
+pub const TEST_CATEGORY: &str = "Development";
+pub const TEST_BUDGET: u64 = 10_000_000;
+pub const TEST_DEADLINE: i64 = 2_000_000_000; // far future, always > now + 86400
+
 pub struct Env {
     pub svm: LiteSVM,
     pub payer: Keypair,
@@ -42,6 +49,10 @@ pub fn setup() -> Env {
     }
 
     create_mint(&mut svm, &payer, &mint, USDC_DECIMALS);
+
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = 1_700_000_000;
+    svm.set_sysvar::<Clock>(&clock);
 
     Env { svm, payer, client, freelancer, mint }
 }
@@ -187,20 +198,73 @@ pub fn vault_token_pda(gig: &Pubkey) -> (Pubkey, u8) {
 
 pub fn ix_initialize_gig(
     client: &Pubkey,
-    freelancer: &Pubkey,
     mint: &Pubkey,
     gig: &Pubkey,
     id: u64,
+    title: String,
+    description: String,
+    category: String,
+    budget: u64,
+    deadline: i64,
 ) -> Instruction {
     Instruction::new_with_bytes(
         escrow::ID,
-        &escrow::instruction::InitializeGig { id }.data(),
+        &escrow::instruction::InitializeGig { id, title, description, category, budget, deadline }.data(),
         escrow::accounts::InitializeGig {
             client: *client,
-            freelancer: *freelancer,
             mint: *mint,
             gig: *gig,
             system_program: anchor_lang::solana_program::system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn ix_update_gig(
+    client: &Pubkey,
+    gig: &Pubkey,
+    title: String,
+    description: String,
+    skills: String,
+    category: String,
+    budget: u64,
+    deadline: i64,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::UpdateGig { title, description, skills, category, budget, deadline }.data(),
+        escrow::accounts::UpdateGig {
+            client: *client,
+            gig: *gig,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn ix_publish_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::PublishGig {}.data(),
+        escrow::accounts::PublishGig {
+            client: *client,
+            gig: *gig,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn ix_assign_freelancer(
+    client: &Pubkey,
+    freelancer: &Pubkey,
+    gig: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::AssignFreelancer {}.data(),
+        escrow::accounts::AssignFreelancer {
+            client: *client,
+            freelancer: *freelancer,
+            gig: *gig,
         }
         .to_account_metas(None),
     )
@@ -335,6 +399,42 @@ pub fn ix_full_timeout_release(a: &TimeoutAccounts) -> Instruction {
     )
 }
 
+pub fn ix_complete_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::CompleteGig {}.data(),
+        escrow::accounts::CompleteGig {
+            client: *client,
+            gig: *gig,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn ix_archive_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::ArchiveGig {}.data(),
+        escrow::accounts::ArchiveGig {
+            client: *client,
+            gig: *gig,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn ix_cancel_gig(client: &Pubkey, gig: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        escrow::ID,
+        &escrow::instruction::CancelGig {}.data(),
+        escrow::accounts::CancelGig {
+            client: *client,
+            gig: *gig,
+        }
+        .to_account_metas(None),
+    )
+}
+
 pub fn ix_cancel_before_funding(client: &Pubkey, gig: &Pubkey, milestone: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         escrow::ID,
@@ -348,7 +448,7 @@ pub fn ix_cancel_before_funding(client: &Pubkey, gig: &Pubkey, milestone: &Pubke
     )
 }
 
-// ── Test harness: initialize + create milestone + token accounts ──
+// ── Test harness helpers ──
 
 pub struct SetupAccounts {
     pub gig: Pubkey,
@@ -366,15 +466,75 @@ pub fn init_gig(env: &mut Env, gig_id: u64) -> Pubkey {
         &env.payer,
         &[ix_initialize_gig(
             &env.client.pubkey(),
-            &env.freelancer.pubkey(),
             &env.mint.pubkey(),
             &gig,
             gig_id,
+            TEST_TITLE.to_string(),
+            TEST_DESCRIPTION.to_string(),
+            TEST_CATEGORY.to_string(),
+            TEST_BUDGET,
+            TEST_DEADLINE,
         )],
         &[&env.payer, &env.client],
     )
     .unwrap();
     gig
+}
+
+pub fn publish_gig(env: &mut Env, gig: &Pubkey) {
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_publish_gig(&env.client.pubkey(), gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+}
+
+pub fn assign_freelancer_to(env: &mut Env, gig: &Pubkey, freelancer: &Pubkey) {
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_assign_freelancer(&env.client.pubkey(), freelancer, gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+}
+
+pub fn publish_and_assign(env: &mut Env, gig: &Pubkey) {
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(env, gig);
+    assign_freelancer_to(env, gig, &freelancer);
+}
+
+pub fn complete_gig_for(env: &mut Env, gig: &Pubkey) {
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_complete_gig(&env.client.pubkey(), gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+}
+
+pub fn archive_gig_for(env: &mut Env, gig: &Pubkey) {
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_archive_gig(&env.client.pubkey(), gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+}
+
+pub fn cancel_gig_for(env: &mut Env, gig: &Pubkey) {
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_cancel_gig(&env.client.pubkey(), gig)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
 }
 
 pub fn create_milestone_for(env: &mut Env, gig: &Pubkey, index: u32, amount: u64) -> Pubkey {
@@ -389,8 +549,10 @@ pub fn create_milestone_for(env: &mut Env, gig: &Pubkey, index: u32, amount: u64
     milestone
 }
 
+/// Full harness: init gig (Draft) → publish → assign freelancer → create milestone 0 → fund.
 pub fn create_funded_milestone(env: &mut Env, gig_id: u64, amount: u64) -> SetupAccounts {
     let gig = init_gig(env, gig_id);
+    publish_and_assign(env, &gig);
     let milestone = create_milestone_for(env, &gig, 0, amount);
 
     let (vault, _) = vault_pda(&gig);

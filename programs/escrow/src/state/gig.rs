@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 
+use crate::constants::*;
 use super::enums::GigStatus;
 
 #[account]
@@ -12,6 +13,13 @@ pub struct Gig {
     pub active_milestone: u32,
     pub status: GigStatus,
     pub created_at: i64,
+    pub updated_at: i64,
+    pub title: String,
+    pub description: String,
+    pub skills: String,
+    pub category: String,
+    pub budget: u64,
+    pub deadline: i64,
     pub bump: u8,
 }
 
@@ -25,5 +33,12 @@ impl Gig {
         + 4 // active_milestone
         + 1 // status
         + 8 // created_at
+        + 8 // updated_at
+        + 4 + MAX_TITLE_LEN // title
+        + 4 + MAX_DESCRIPTION_LEN // description
+        + 4 + MAX_SKILLS_LEN // skills
+        + 4 + MAX_CATEGORY_LEN // category
+        + 8 // budget
+        + 8 // deadline
         + 1; // bump
 }

@@ -27,9 +27,9 @@ fn test_initialize_gig() {
 
     assert_eq!(gig.id, gig_id);
     assert_eq!(gig.client, env.client.pubkey());
-    assert_eq!(gig.freelancer, env.freelancer.pubkey());
+    assert_eq!(gig.freelancer, Pubkey::default());
     assert_eq!(gig.mint, env.mint.pubkey());
-    assert_eq!(gig.status, GigStatus::Active);
+    assert_eq!(gig.status, GigStatus::Draft);
     assert_eq!(gig.milestone_count, 0);
     assert_eq!(gig.active_milestone, 0);
     assert!(gig.created_at >= clock_before && gig.created_at <= clock_after);
@@ -41,6 +41,7 @@ fn test_create_milestone() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
 
     let (expected_pda, expected_bump) = milestone_pda(&gig_key, 0);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
@@ -66,6 +67,7 @@ fn test_fund_milestone() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
 
     let (vault, vault_bump) = vault_pda(&gig_key);
@@ -326,6 +328,7 @@ fn test_cancel_before_funding() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
 
     assert!(env.svm.get_account(&milestone_key).is_some());
@@ -350,6 +353,7 @@ fn test_multiple_milestones_full_approve() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
 
     let amounts = [100_000u64, 200_000u64, 300_000u64];
     let mut milestones: Vec<Pubkey> = Vec::new();
@@ -448,7 +452,7 @@ fn test_multiple_milestones_full_approve() {
         if i == amounts.len() - 1 {
             assert_eq!(g.status, GigStatus::Completed);
         } else {
-            assert_eq!(g.status, GigStatus::Active);
+            assert_eq!(g.status, GigStatus::Assigned);
             assert_eq!(g.active_milestone, (i + 1) as u32);
         }
     }
@@ -465,6 +469,7 @@ fn test_gig_completes_on_last_milestone() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
 
     let m1 = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
     let m2 = create_milestone_for(&mut env, &gig_key, 1, STANDARD_AMOUNT);
@@ -529,7 +534,7 @@ fn test_gig_completes_on_last_milestone() {
     .unwrap();
 
     let gig_state = read_gig(&env.svm, &gig_key);
-    assert_eq!(gig_state.status, GigStatus::Active);
+    assert_eq!(gig_state.status, GigStatus::Assigned);
     assert_eq!(gig_state.active_milestone, 1);
 
     send(

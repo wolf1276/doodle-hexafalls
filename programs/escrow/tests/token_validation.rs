@@ -12,6 +12,7 @@ fn next_id() -> u64 { NEXT_ID.fetch_add(1, Ordering::Relaxed) }
 fn test_fund_with_wrong_mint() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let wrong_mint = Keypair::new();
@@ -51,6 +52,7 @@ fn test_fund_with_wrong_mint() {
 fn test_fund_with_wrong_client_token_mint() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let wrong_mint = Keypair::new();
@@ -82,6 +84,7 @@ fn test_fund_with_wrong_client_token_mint() {
 fn test_fund_with_wrong_client_token_owner() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let random = Keypair::new();
@@ -113,6 +116,7 @@ fn test_fund_with_wrong_client_token_owner() {
 fn test_fund_with_empty_token_account() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -141,6 +145,7 @@ fn test_fund_with_empty_token_account() {
 fn test_fund_with_insufficient_balance() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -283,6 +288,7 @@ fn test_approve_wrong_vault_token_account() {
 fn test_fund_wrong_vault_token_account() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -320,6 +326,7 @@ fn test_fund_wrong_vault_token_account() {
 fn test_wrong_mint_in_gig_initialization() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let wrong_mint = Keypair::new();

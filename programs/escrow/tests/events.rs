@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,10 +31,14 @@ fn test_gig_created_event() {
         &env.payer,
         &[ix_initialize_gig(
             &env.client.pubkey(),
-            &env.freelancer.pubkey(),
             &env.mint.pubkey(),
             &expected_gig,
             gig_id,
+            TEST_TITLE.to_string(),
+            TEST_DESCRIPTION.to_string(),
+            TEST_CATEGORY.to_string(),
+            TEST_BUDGET,
+            TEST_DEADLINE,
         )],
         &[&env.payer, &env.client],
     )
@@ -44,9 +49,9 @@ fn test_gig_created_event() {
     let gig = read_gig(&env.svm, &expected_gig);
     assert_eq!(gig.id, gig_id);
     assert_eq!(gig.client, env.client.pubkey());
-    assert_eq!(gig.freelancer, env.freelancer.pubkey());
+    assert_eq!(gig.freelancer, Pubkey::default());
     assert_eq!(gig.mint, env.mint.pubkey());
-    assert_eq!(gig.status, GigStatus::Active);
+    assert_eq!(gig.status, GigStatus::Draft);
     assert_eq!(gig.created_at, clock.unix_timestamp);
 }
 
@@ -55,6 +60,7 @@ fn test_milestone_created_event() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let (expected_milestone, _) = milestone_pda(&gig_key, 0);
 
     let logs = send_logs(
@@ -78,6 +84,7 @@ fn test_milestone_funded_event() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig_key);
@@ -279,10 +286,96 @@ fn test_full_release_event() {
 }
 
 #[test]
+fn test_gig_published_event() {
+    let mut env = setup();
+    let gig_id = next_id();
+    let gig_key = init_gig(&mut env, gig_id);
+
+    let logs = send_logs(
+        &mut env.svm,
+        &env.payer,
+        &[ix_publish_gig(&env.client.pubkey(), &gig_key)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+
+    assert!(has_event(&logs), "GigPublished event should be emitted");
+    let gig = read_gig(&env.svm, &gig_key);
+    assert_eq!(gig.status, GigStatus::Published);
+}
+
+#[test]
+fn test_freelancer_assigned_event() {
+    let mut env = setup();
+    let gig_id = next_id();
+    let gig_key = init_gig(&mut env, gig_id);
+    publish_gig(&mut env, &gig_key);
+
+    let logs = send_logs(
+        &mut env.svm,
+        &env.payer,
+        &[ix_assign_freelancer(&env.client.pubkey(), &env.freelancer.pubkey(), &gig_key)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+
+    assert!(has_event(&logs), "FreelancerAssigned event should be emitted");
+    let gig = read_gig(&env.svm, &gig_key);
+    assert_eq!(gig.status, GigStatus::Assigned);
+    assert_eq!(gig.freelancer, env.freelancer.pubkey());
+}
+
+#[test]
+fn test_gig_completed_event() {
+    let mut env = setup();
+    let gig_id = next_id();
+    let gig_key = init_gig(&mut env, gig_id);
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(&mut env, &gig_key);
+    assign_freelancer_to(&mut env, &gig_key, &freelancer);
+
+    let logs = send_logs(
+        &mut env.svm,
+        &env.payer,
+        &[ix_complete_gig(&env.client.pubkey(), &gig_key)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+
+    assert!(has_event(&logs), "GigCompleted event should be emitted");
+    let gig = read_gig(&env.svm, &gig_key);
+    assert_eq!(gig.status, GigStatus::Completed);
+}
+
+#[test]
+fn test_gig_archived_event() {
+    let mut env = setup();
+    let gig_id = next_id();
+    let gig_key = init_gig(&mut env, gig_id);
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(&mut env, &gig_key);
+    assign_freelancer_to(&mut env, &gig_key, &freelancer);
+    complete_gig_for(&mut env, &gig_key);
+
+    let logs = send_logs(
+        &mut env.svm,
+        &env.payer,
+        &[ix_archive_gig(&env.client.pubkey(), &gig_key)],
+        &[&env.payer, &env.client],
+    )
+    .unwrap();
+
+    assert!(has_event(&logs), "GigArchived event should be emitted");
+    let gig = read_gig(&env.svm, &gig_key);
+    assert_eq!(gig.status, GigStatus::Archived);
+}
+
+#[test]
 fn test_gig_cancelled_event() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
 
     let logs = send_logs(
@@ -337,6 +430,7 @@ fn test_event_order() {
     let mut env = setup();
     let gig_id = next_id();
     let gig_key = init_gig(&mut env, gig_id);
+    publish_and_assign(&mut env, &gig_key);
     let milestone_key = create_milestone_for(&mut env, &gig_key, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig_key);

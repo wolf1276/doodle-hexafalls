@@ -1,38 +1,28 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::Mint;
 
 use crate::constants::*;
 use crate::errors::EscrowError;
-use crate::events::GigCreated;
+use crate::events::GigUpdated;
 use crate::state::{Gig, GigStatus};
 
 #[derive(Accounts)]
-#[instruction(id: u64, title: String, description: String, category: String, budget: u64, deadline: i64)]
-pub struct InitializeGig<'info> {
+pub struct UpdateGig<'info> {
     #[account(mut)]
     pub client: Signer<'info>,
 
-    /// CHECK: freelancer is only stored as a pubkey reference, never signs here.
-    pub mint: Account<'info, Mint>,
-
     #[account(
-        init,
-        payer = client,
-        space = Gig::INIT_SPACE,
-        seeds = [GIG_SEED, id.to_le_bytes().as_ref()],
-        bump,
+        mut,
+        has_one = client @ EscrowError::Unauthorized,
+        constraint = gig.status == GigStatus::Draft @ EscrowError::NotDraftStatus,
     )]
     pub gig: Account<'info, Gig>,
-
-    pub system_program: Program<'info, System>,
 }
 
-/// Creates a new Gig PDA in Draft status with the given metadata.
 pub fn handler(
-    ctx: Context<InitializeGig>,
-    id: u64,
+    ctx: Context<UpdateGig>,
     title: String,
     description: String,
+    skills: String,
     category: String,
     budget: u64,
     deadline: i64,
@@ -40,6 +30,7 @@ pub fn handler(
     require!(title.len() <= MAX_TITLE_LEN, EscrowError::TitleTooLong);
     require!(!title.is_empty(), EscrowError::TitleTooLong);
     require!(description.len() <= MAX_DESCRIPTION_LEN, EscrowError::DescriptionTooLong);
+    require!(skills.len() <= MAX_SKILLS_LEN, EscrowError::SkillsTooLong);
     require!(category.len() <= MAX_CATEGORY_LEN, EscrowError::CategoryTooLong);
     require!(budget > 0, EscrowError::InvalidBudget);
 
@@ -47,29 +38,23 @@ pub fn handler(
     require!(deadline > now + MIN_DEADLINE_SECS, EscrowError::InvalidDeadline);
 
     let gig = &mut ctx.accounts.gig;
-    gig.id = id;
-    gig.client = ctx.accounts.client.key();
-    gig.freelancer = Pubkey::default();
-    gig.mint = ctx.accounts.mint.key();
-    gig.milestone_count = 0;
-    gig.active_milestone = 0;
-    gig.status = GigStatus::Draft;
-    gig.created_at = now;
     gig.updated_at = now;
     gig.title = title;
     gig.description = description;
-    gig.skills = String::new();
+    gig.skills = skills;
     gig.category = category;
     gig.budget = budget;
     gig.deadline = deadline;
-    gig.bump = ctx.bumps.gig;
 
-    emit!(GigCreated {
+    emit!(GigUpdated {
         gig: gig.key(),
-        id,
-        client: gig.client,
-        freelancer: gig.freelancer,
-        created_at: now,
+        id: gig.id,
+        title: gig.title.clone(),
+        description: gig.description.clone(),
+        skills: gig.skills.clone(),
+        category: gig.category.clone(),
+        budget: gig.budget,
+        deadline: gig.deadline,
     });
 
     Ok(())

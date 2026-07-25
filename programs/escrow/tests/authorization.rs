@@ -30,6 +30,7 @@ fn test_create_milestone_unauthorized() {
 fn test_fund_milestone_by_random() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let random = Keypair::new();
@@ -165,6 +166,7 @@ fn test_approve_by_random() {
 fn test_cancel_by_random() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let random = Keypair::new();
@@ -183,6 +185,7 @@ fn test_cancel_by_random() {
 fn test_cancel_by_freelancer() {
     let mut env = setup();
     let gig = init_gig(&mut env, next_id());
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let result = send(
@@ -195,22 +198,89 @@ fn test_cancel_by_freelancer() {
 }
 
 #[test]
-fn test_initialize_gig_client_eq_freelancer() {
+fn test_assign_freelancer_client_eq_freelancer() {
     let mut env = setup();
-    let id = next_id();
-    let (gig, _) = gig_pda(id);
+    let gig = init_gig(&mut env, next_id());
+    publish_gig(&mut env, &gig);
 
     let result = send(
         &mut env.svm,
         &env.payer,
-        &[ix_initialize_gig(
-            &env.client.pubkey(),
-            &env.client.pubkey(),
-            &env.mint.pubkey(),
-            &gig,
-            id,
-        )],
+        &[ix_assign_freelancer(&env.client.pubkey(), &env.client.pubkey(), &gig)],
         &[&env.payer, &env.client],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_publish_gig_unauthorized() {
+    let mut env = setup();
+    let gig = init_gig(&mut env, next_id());
+    let result = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_publish_gig(&env.freelancer.pubkey(), &gig)],
+        &[&env.payer, &env.freelancer],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_assign_freelancer_unauthorized() {
+    let mut env = setup();
+    let gig = init_gig(&mut env, next_id());
+    publish_gig(&mut env, &gig);
+    let result = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_assign_freelancer(&env.freelancer.pubkey(), &env.freelancer.pubkey(), &gig)],
+        &[&env.payer, &env.freelancer],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_complete_gig_unauthorized() {
+    let mut env = setup();
+    let gig = init_gig(&mut env, next_id());
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(&mut env, &gig);
+    assign_freelancer_to(&mut env, &gig, &freelancer);
+    let result = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_complete_gig(&freelancer, &gig)],
+        &[&env.payer, &env.freelancer],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_archive_gig_unauthorized() {
+    let mut env = setup();
+    let gig = init_gig(&mut env, next_id());
+    let freelancer = env.freelancer.pubkey();
+    publish_gig(&mut env, &gig);
+    assign_freelancer_to(&mut env, &gig, &freelancer);
+    complete_gig_for(&mut env, &gig);
+    let result = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_archive_gig(&freelancer, &gig)],
+        &[&env.payer, &env.freelancer],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cancel_gig_unauthorized() {
+    let mut env = setup();
+    let gig = init_gig(&mut env, next_id());
+    let result = send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_cancel_gig(&env.freelancer.pubkey(), &gig)],
+        &[&env.payer, &env.freelancer],
     );
     assert!(result.is_err());
 }

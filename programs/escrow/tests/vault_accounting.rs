@@ -14,6 +14,7 @@ fn test_invariant_after_fund() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -52,6 +53,7 @@ fn test_invariant_after_approve() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -116,6 +118,7 @@ fn test_invariant_after_partial_timeout() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -184,6 +187,7 @@ fn test_invariant_after_full_timeout() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -265,6 +269,7 @@ fn test_invariant_multiple_milestones() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
 
     let amount_a: u64 = 300_000;
     let amount_b: u64 = 700_000;
@@ -387,6 +392,7 @@ fn test_no_token_leakage() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
     let milestone = create_milestone_for(&mut env, &gig, 0, STANDARD_AMOUNT);
 
     let (vault, _) = vault_pda(&gig);
@@ -526,6 +532,7 @@ fn test_invariant_holds_through_complex_flow() {
     let mut env = setup();
     let id = next_id();
     let gig = init_gig(&mut env, id);
+    publish_and_assign(&mut env, &gig);
 
     let amount_a: u64 = 1000;
     let amount_b: u64 = 2000;
