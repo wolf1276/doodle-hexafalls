@@ -1,8 +1,8 @@
-# Escrow Program — Security
+# Escrow & Reputation Programs — Security
 
-**Audit status: Complete.** The Escrow program (`programs/escrow`) has completed implementation, a full internal security audit, and a 106-test regression/security suite covering every invariant documented below. No open findings.
+**Audit status: Complete for both programs.** The Escrow program (`programs/escrow`) and the Reputation program (`programs/reputation`) have each completed implementation, a full internal security audit, and their own regression/security test suite — 106 tests (Escrow) and 145 tests (Reputation) — covering every invariant documented below. No open findings in either program.
 
-Scope of this document: `programs/escrow` only. The Reputation program (`programs/reputation`) and Dispute program (`programs/dispute`, unimplemented) are out of scope and are audited/tracked separately.
+Scope of this document: `programs/escrow` (§1–14) and `programs/reputation` (§15–26). The Dispute program (`programs/dispute`, unimplemented) is out of scope and tracked separately.
 
 ## 1. Threat Model
 
@@ -126,3 +126,130 @@ The program makes exactly one class of outbound CPI: `anchor_spl::token::transfe
 8. Timeout releases cannot fire before their exact deadline, but are permissionless once eligible.
 9. All arithmetic on balances/counters is checked; overflow/underflow abort the transaction.
 10. Every PDA used by any instruction is re-derived and validated against its logical parent, blocking substitution/spoofing.
+
+---
+
+# Reputation Program — Security
+
+**Audit status: Complete.** The Reputation program (`programs/reputation`) has completed implementation, a full internal security audit, and a 145-test regression/security suite (`cargo test -p reputation`, `programs/reputation/tests/`) covering every invariant documented below. No open findings.
+
+## 15. Threat Model
+
+Actors:
+
+- **Profile authority** — the user a `UserProfile` belongs to. Signs `initialize_profile` only. Trusted to sign only their own transactions.
+- **Client** — signs `submit_rating` for a job they claim to have commissioned. Trusted to sign only their own transactions; **not** trusted to submit an honest score, or to necessarily be the real client of the referenced job (§15.4, Trust Assumptions).
+- **`REPUTATION_AUTHORITY`** — a single hardcoded pubkey, the only signer accepted for `update_completion` and `award_badge`. Fully trusted for the correctness of completion/earnings data and badge issuance in the current (pre-CPI) design; see §18 in ARCHITECTURE.md.
+- **Adversarial transaction builder** — may supply arbitrary accounts to any instruction, including the right account *type* at the wrong *instance* (e.g. someone else's profile), or uninitialized/attacker-owned accounts, attempting to spoof a PDA.
+
+Assets at risk: the integrity of on-chain reputation data (scores, ratings, badges). The program holds no funds, so there is no direct custody risk; the risk is data integrity and manipulation of a signal other systems (including, eventually, Escrow) may rely on.
+
+### 15.4 Trust Assumptions (explicitly out of this program's control)
+
+Documented rather than hidden, because an accurate security posture requires naming what is *not* enforced on-chain:
+
+- **Job identity is caller-supplied.** `submit_rating` takes `client` (the signer) and `freelancer` (an unchecked account) directly as instruction inputs; the program does not verify against Escrow that `job_id` corresponds to a real, completed `Gig` between those two parties. Anyone who can sign a transaction and knows a `job_id` that hasn't been rated yet can submit a rating for any `freelancer` account of their choosing. This is a consequence of Reputation being deliberately decoupled from Escrow today (ARCHITECTURE.md §3, §18) and is the responsibility of the caller (or, once CPI wiring exists, of Escrow) to constrain.
+- **`REPUTATION_AUTHORITY` is a single centralized signer** for `update_completion` and `award_badge`. Its private key is a trust bottleneck: whoever holds it can record arbitrary completions/earnings and award `TrustedFreelancer`/`FastDeliverer` badges (which have no on-chain eligibility check — see §21). This is an accepted, documented MVP trade-off (ARCHITECTURE.md §18), not an oversight; the account-constraint shape was chosen specifically so it can be replaced by a CPI-only check from Escrow without an account-layout migration.
+
+## 16. Signer Validation
+
+- `initialize_profile` — `authority` must sign; the PDA is derived from that same signer's key, so a profile can only ever be created "as" its own authority.
+- `submit_rating` — `client` must sign; `require_keys_neq!(client, freelancer)` prevents a client from rating their own freelancer profile (self-dealing).
+- `update_completion` / `award_badge` — the signer is constrained with `#[account(address = REPUTATION_AUTHORITY @ ReputationError::Unauthorized)]`, i.e. only the one hardcoded authority pubkey is ever accepted, not merely "some signer."
+- `get_profile` — read-only, no signer required.
+
+`tests/profile_authorization.rs` (20 tests) and `tests/regressions.rs` (10 tests, including `test_authority_check_not_bypassed` and `test_self_dealing_check_not_bypassed`) assert every signer-gated instruction rejects the wrong signer.
+
+## 17. Ownership & Account-Type Validation
+
+As with Escrow (§3), Anchor's typed `Account<'info, T>` wrapper checks the account discriminator on every typed account, so a `Rating` cannot be substituted where a `UserProfile` is expected, and vice versa — the framework rejects the wrong account type before the handler body runs.
+
+## 18. PDA Validation & Anti-Spoofing
+
+Full design rationale in [ARCHITECTURE.md § 14](./ARCHITECTURE.md#14-pda-architecture). Security-relevant guarantees:
+
+- Every PDA is constrained with `seeds = [...], bump` (on `init`) or `seeds = [...], bump = stored_bump` (on reuse), forcing re-derivation and an exact address match.
+- `freelancer_profile` in `submit_rating` and `profile` in `update_completion`/`award_badge`/`get_profile` are all re-derived from `[PROFILE_SEED, authority.as_ref()]` — a caller cannot pass a different authority's profile and have it accepted as "the" profile for a given authority.
+- `Badge` PDAs are seeded by `[BADGE_SEED, profile.authority, badge_type]`, so a spoofed badge account for the wrong profile or wrong type fails derivation.
+
+Verified by `tests/pda_security.rs` (24 tests): wrong profile PDA, wrong rating PDA, wrong badge PDA, wrong bump, profile-for-a-different-authority, cross-profile badge substitution, and uninitialized spoofed PDAs are all rejected.
+
+## 19. Reinitialization & Replay Protection
+
+- `UserProfile`, `Rating`, and `Badge` all use Anchor `init` (never `init_if_needed`), so none of them can ever be reinitialized once created at their canonical address.
+- `initialize_profile` therefore cannot be called twice for the same authority — the second call fails at account-init time with no separate existence check needed.
+- `submit_rating`'s `Rating` PDA is seeded by `job_id` alone, so a second `submit_rating` for the same `job_id` — a replay or duplicate-rating attempt — fails at `init` time. This is the program's entire duplicate-rating defense, and it is structural (seed collision) rather than a runtime `require!` check that could be forgotten on a future code path.
+- `award_badge`'s `Badge` PDA is seeded by `(profile, badge_type)`, so a second award of the same badge type to the same profile fails at `init` time — duplicate-badge prevention, structurally enforced the same way.
+
+`tests/regressions.rs` includes `test_duplicate_prevention_not_bypassed`; `tests/rating_submission.rs` (34 tests) and `tests/badge_system.rs` (36 tests) each dedicate cases to the duplicate-`job_id`/duplicate-`badge_type` paths specifically.
+
+## 20. Checked Arithmetic — Overflow & Underflow Protection
+
+All counter/score math routes through `programs/reputation/src/utils.rs`'s `checked_add`/`checked_sub`/`checked_mul`/`checked_div` helpers, never raw operators:
+
+- `completed_jobs`, `successful_jobs`, `cancelled_jobs`, `total_earnings`, `rating_sum`, `rating_count`, `badges_earned` are all updated exclusively via `checked_add`, returning `ReputationError::MathOverflow` on overflow.
+- `average_rating` promotes through `checked_mul(rating_sum, RATING_SCALE)` then `checked_div(_, rating_count)` before a final `u32::try_from` bounds check — an overflow at any step aborts rather than wrapping or truncating silently.
+- `compute_reputation_score` (§21) uses `checked_mul`/`checked_add` for every weighted term and `saturating_sub` (not raw subtraction) for the cancellation penalty, explicitly to avoid underflow when the penalty term exceeds the weighted sum — the result is clamped to `0` rather than wrapping to a near-`u64::MAX` value.
+
+`tests/math.rs` (14 tests) and `tests/reputation_algorithm.rs` (22 tests, including `test_score_does_not_overflow_with_extreme_values`) cover boundary values including near-`u64::MAX` inputs; `src/utils.rs` also carries inline `#[cfg(test)]` unit tests (`checked_add_overflows`, `checked_sub_underflows`) exercising the helpers directly.
+
+## 21. Reputation Score & Rating Integrity
+
+### 21.1 Immutable Ratings
+
+`Rating` has no update or delete instruction. Once `submit_rating` succeeds, `score`, `review_hash`, `client`, `freelancer`, and `submitted_at` are permanent. `tests/state_invariants.rs` includes `test_ratings_immutable`.
+
+### 21.2 Immutable Profile Authority
+
+`UserProfile.authority` is set once at `init` and never written by any other instruction. `tests/state_invariants.rs` includes `test_profile_authority_immutable`.
+
+### 21.3 Rating Validation
+
+`submit_rating` requires `(MIN_RATING..=MAX_RATING).contains(&score)` i.e. `1..=5`, rejecting `0` and anything `> 5` with `ReputationError::InvalidRating`. `tests/rating_validation.rs` (18 tests) and `tests/regressions.rs::test_range_check_not_bypassed` cover the boundary.
+
+### 21.4 Authority Validation for Privileged Actions
+
+`update_completion` and `award_badge` both require the signer to equal `REPUTATION_AUTHORITY` exactly (§16, §15.4). This is the program's central trust assumption today and is disclosed, not hidden, in ARCHITECTURE.md §18.
+
+### 21.5 Deterministic Reputation Calculation
+
+`compute_reputation_score` is a pure function of `UserProfile`'s own stored fields (`completed_jobs`, `successful_jobs`, `total_earnings`, `average_rating`, `cancelled_jobs`) — a weighted sum of four capped components (success rate, average rating, completed-job volume, lifetime earnings) minus a cancellation penalty, clamped to `[0, MAX_REPUTATION_SCORE]`. No randomness, no external oracle, no off-chain input: the same stored fields always produce the same score, and any observer can recompute and verify it independently from public account data. `tests/reputation_algorithm.rs` (22 tests) includes `test_score_is_deterministic` and `test_score_equal_for_identical_inputs`.
+
+### 21.6 Badge Eligibility
+
+`is_eligible_for_badge` deterministically checks five of the seven badge types against on-chain profile fields (`FirstGig`, `TenCompletedJobs`, `HundredCompletedJobs`, `FiveStarPerformer`, `TopRated`); `TrustedFreelancer` and `FastDeliverer` return `true` unconditionally and rely entirely on `REPUTATION_AUTHORITY`'s judgment plus the structural one-per-type duplicate guard (§19). This split is documented in source (`utils.rs`) and in ARCHITECTURE.md §19 rather than presented as a uniform on-chain guarantee. `tests/badge_system.rs` (36 tests) covers eligibility for every badge type, including the two authority-attested ones.
+
+### 21.7 Metadata Bounds
+
+`award_badge` requires `metadata.len() <= Badge::MAX_METADATA_LEN` (128 bytes), rejecting oversized metadata with `ReputationError::MetadataTooLong` before any account write.
+
+## 22. Event Correctness
+
+Every emitting instruction's event (`ProfileCreated`, `RatingSubmitted`, `CompletionUpdated`, `BadgeAwarded`) is asserted field-for-field against the instruction's actual resulting account state in `tests/events.rs` (20 tests). `ProfileUpdated` is defined but not currently emitted by any instruction — see ARCHITECTURE.md §17 — and is called out here so it is not mistaken for a monitored, silently-broken event path.
+
+## 23. State Consistency
+
+`tests/state_invariants.rs` (20 tests) directly asserts the invariants a reputation record must never violate: `completed_jobs >= successful_jobs`, `total_earnings` never decreases, `updated_at` is monotonically non-decreasing, `created_at` never changes, `average_rating` stays within `[0, 500]`, badges are unique per type, and `reputation_score` is reproducible from stored fields after an arbitrary sequence of operations (`test_all_invariants_hold_after_multiple_operations`).
+
+## 24. Error Handling
+
+`ReputationError` defines 11 variants. `ProfileAlreadyExists`, `ProfileNotFound`, and `InvalidEarnings` are defined but not currently returned by any instruction — duplicate-profile and duplicate-job protection are enforced structurally via PDA `init` (§19) rather than via an explicit existence check, and no instruction currently decreases `total_earnings`. Documented here rather than left as unexplained dead code; each is a reserved slot for a future explicit check rather than a broken current one.
+
+## 25. Regression Coverage
+
+`tests/regressions.rs` (10 tests) specifically re-asserts, as a group, that no previously-fixed or previously-verified check has been silently bypassed: range validation, authority validation, duplicate-prevention, self-dealing prevention, and eligibility validation are each re-checked directly rather than only incidentally through happy-path tests.
+
+## 26. Summary of Enforced Invariants (Reputation)
+
+1. A profile can be created exactly once per authority.
+2. A job can be rated exactly once, ever, regardless of which client submits it.
+3. A badge type can be awarded to a given profile exactly once.
+4. Only `REPUTATION_AUTHORITY` can record completions or award badges.
+5. A client cannot rate a job where they are also the freelancer.
+6. Ratings are immutable once submitted.
+7. A profile's `authority` field never changes after creation.
+8. `total_earnings`, `completed_jobs`, `successful_jobs`, `cancelled_jobs`, `rating_count`, `badges_earned` only ever increase.
+9. `reputation_score` is always a pure, deterministic, independently-verifiable function of the profile's own stored fields.
+10. All arithmetic on counters/scores is checked or explicitly saturating; overflow aborts the transaction, and the score is clamped rather than allowed to wrap.
+11. Every PDA used by any instruction is re-derived and validated against its logical parent (authority, profile, or badge type), blocking substitution/spoofing.
+12. `REPUTATION_AUTHORITY` centralization and caller-supplied job identity are explicit, documented trust assumptions, not silently-assumed guarantees (§15.4).

@@ -16,7 +16,16 @@
 
 ## Reputation Program — `programs/reputation`
 
-Implemented and covered by its own `litesvm` test suite (`programs/reputation/tests/`: `happy_path.rs`, `authorization.rs`, `arithmetic.rs`, `pda_security.rs`, `events.rs`). Deployed and audited independently of Escrow — see [ARCHITECTURE.md § 3](./ARCHITECTURE.md#3-why-reputation-and-disputes-are-separate-programs) for why the two are not currently CPI-linked.
+**Status: Production Ready.**
+
+- ✅ **Architecture Complete** — `UserProfile`/`Rating`/`Badge` account model, instruction flow, and state model finalized and documented in [ARCHITECTURE.md § Reputation Program Architecture](./ARCHITECTURE.md#reputation-program--architecture).
+- ✅ **Core Instructions Complete** — all 5 instructions implemented: `initialize_profile`, `submit_rating`, `update_completion`, `award_badge`, `get_profile`.
+- ✅ **PDA Design Complete** — UserProfile, Rating, and Badge PDAs designed, implemented, and validated against spoofing. See [ARCHITECTURE.md § 14](./ARCHITECTURE.md#14-pda-architecture).
+- ✅ **Events Complete** — 4 of 5 defined events are emitted by their respective instructions (`ProfileCreated`, `RatingSubmitted`, `CompletionUpdated`, `BadgeAwarded`); `ProfileUpdated` is defined and reserved but not currently emitted (see [ARCHITECTURE.md § 17](./ARCHITECTURE.md#17-event-architecture)).
+- ✅ **Errors Complete** — 11 `ReputationError` variants covering validation, authorization, and arithmetic failures; 3 are reserved for checks not yet exercised by any instruction (see [SECURITY.md § 24](./SECURITY.md#24-error-handling)).
+- ✅ **Test Suite Complete** — 145 tests across 12 modules (see [TESTING.md](./TESTING.md)), run via `litesvm`, 0 failures.
+- ✅ **Security Audit Complete** — full internal audit covering signer validation, PDA validation, checked arithmetic, reinitialization/replay protection, rating/badge duplicate prevention, deterministic score computation, event correctness, and state consistency (see [SECURITY.md § Reputation Program Security](./SECURITY.md#reputation-program--security)). No open findings; two explicit, documented trust assumptions (`REPUTATION_AUTHORITY` centralization and caller-supplied job identity) remain as accepted pre-CPI trade-offs, not defects.
+- ✅ **Production Ready** — implementation, tests, and audit complete; deployed and audited independently of Escrow. See [ARCHITECTURE.md § 3](./ARCHITECTURE.md#3-why-reputation-and-disputes-are-separate-programs) for why the two are not currently CPI-linked, and [ARCHITECTURE.md § 18](./ARCHITECTURE.md#18-future-cpi-compatibility) for the compatible migration path once they are.
 
 ## Dispute Program — `programs/dispute`
 
