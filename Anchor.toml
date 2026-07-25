@@ -6,6 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
+gig = "9LpGZY8p8dYfYdWm5D9MuvGXh9VXdF8DqEEAmdNZ92Na"
 escrow = "FFJ8YAVGUJP4SeDZrQ3g1d9fdQFq9hutsU1m4f3o1UXS"
 reputation = "mXn62yZ4KFvPsdtMmEdGkB71jXcr17SQJHXftgPVGNB"
 
@@ -14,6 +15,6 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "cargo test --manifest-path programs/escrow/Cargo.toml && cargo test --manifest-path programs/reputation/Cargo.toml"
+test = "cargo test --manifest-path programs/gig/Cargo.toml && cargo test --manifest-path programs/escrow/Cargo.toml && cargo test --manifest-path programs/reputation/Cargo.toml"
 
 [hooks]

@@ -1237,7 +1237,9 @@ version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
+ "gig",
  "litesvm",
+ "reputation",
  "solana-clock",
  "solana-keypair",
  "solana-message",
@@ -1374,6 +1376,22 @@ dependencies = [
  "libc",
  "r-efi",
  "wasip2",
+]
+
+[[package]]
+name = "gig"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "litesvm",
+ "solana-clock",
+ "solana-keypair",
+ "solana-message",
+ "solana-pubkey 3.0.0",
+ "solana-signer",
+ "solana-transaction",
+ "spl-token-interface",
 ]
 
 [[package]]
