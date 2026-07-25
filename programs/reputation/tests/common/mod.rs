@@ -1,4 +1,11 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
+
+pub mod fixtures;
+pub mod helpers;
+
+pub use fixtures::*;
+pub use helpers::*;
 
 use anchor_lang::{
     solana_program::instruction::Instruction, AccountDeserialize, InstructionData, ToAccountMetas,
@@ -43,7 +50,12 @@ pub fn setup() -> Env {
     Env { svm, payer, client, freelancer, authority }
 }
 
-pub fn send(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<(), String> {
+pub fn send(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    ixs: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<(), String> {
     let blockhash = svm.latest_blockhash();
     let msg = Message::new_with_blockhash(ixs, Some(&payer.pubkey()), &blockhash);
     let mut all_signers = vec![payer];
@@ -52,11 +64,19 @@ pub fn send(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[
             all_signers.push(s);
         }
     }
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
-    svm.send_transaction(tx).map(|_| ()).map_err(|e| e.err.to_string())
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
+    svm.send_transaction(tx)
+        .map(|_| ())
+        .map_err(|e| e.err.to_string())
 }
 
-pub fn send_logs(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signers: &[&Keypair]) -> Result<Vec<String>, String> {
+pub fn send_logs(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    ixs: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<Vec<String>, String> {
     let blockhash = svm.latest_blockhash();
     let msg = Message::new_with_blockhash(ixs, Some(&payer.pubkey()), &blockhash);
     let mut all_signers = vec![payer];
@@ -65,7 +85,8 @@ pub fn send_logs(svm: &mut LiteSVM, payer: &Keypair, ixs: &[Instruction], signer
             all_signers.push(s);
         }
     }
-    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all_signers).unwrap();
     let meta = svm.send_transaction(tx).map_err(|e| e.err.to_string())?;
     Ok(meta.logs)
 }
@@ -95,6 +116,12 @@ pub fn read_badge(svm: &LiteSVM, key: &Pubkey) -> Badge {
 
 pub fn account_exists(svm: &LiteSVM, key: &Pubkey) -> bool {
     svm.get_account(key).is_some()
+}
+
+pub fn account_owned_by_program(svm: &LiteSVM, key: &Pubkey) -> bool {
+    svm.get_account(key)
+        .map(|a| a.owner == reputation::ID)
+        .unwrap_or(false)
 }
 
 // ── PDA derivation ──
@@ -153,7 +180,7 @@ pub fn ix_submit_rating(
 }
 
 pub fn ix_update_completion(
-    authority: &Pubkey,
+    authority_pk: &Pubkey,
     profile: &Pubkey,
     successful: bool,
     earnings: u64,
@@ -161,13 +188,16 @@ pub fn ix_update_completion(
     Instruction::new_with_bytes(
         reputation::ID,
         &reputation::instruction::UpdateCompletion { successful, earnings }.data(),
-        reputation::accounts::UpdateCompletion { authority: *authority, profile: *profile }
-            .to_account_metas(None),
+        reputation::accounts::UpdateCompletion {
+            authority: *authority_pk,
+            profile: *profile,
+        }
+        .to_account_metas(None),
     )
 }
 
 pub fn ix_award_badge(
-    authority: &Pubkey,
+    authority_pk: &Pubkey,
     profile: &Pubkey,
     badge: &Pubkey,
     badge_type: BadgeType,
@@ -177,7 +207,7 @@ pub fn ix_award_badge(
         reputation::ID,
         &reputation::instruction::AwardBadge { badge_type, metadata }.data(),
         reputation::accounts::AwardBadge {
-            authority: *authority,
+            authority: *authority_pk,
             profile: *profile,
             badge: *badge,
             system_program: anchor_lang::solana_program::system_program::ID,
@@ -186,7 +216,18 @@ pub fn ix_award_badge(
     )
 }
 
-// ── Test harness ──
+pub fn ix_get_profile(profile: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        reputation::ID,
+        &reputation::instruction::GetProfile {}.data(),
+        reputation::accounts::GetProfile {
+            profile: *profile,
+        }
+        .to_account_metas(None),
+    )
+}
+
+// ── Test harness helpers ──
 
 pub fn init_profile(env: &mut Env, authority: &Keypair) -> Pubkey {
     let (profile, _) = profile_pda(&authority.pubkey());
@@ -218,41 +259,105 @@ pub fn submit_rating_for(
             &rating,
             job_id,
             score,
-            [7u8; 32],
+            DEFAULT_REVIEW_HASH,
         )],
         &[&env.payer, &env.client],
     )
 }
 
+pub fn submit_rating_as(
+    env: &mut Env,
+    client_key: &Keypair,
+    freelancer: &Pubkey,
+    job_id: u64,
+    score: u8,
+    review_hash: [u8; 32],
+) -> Result<(), String> {
+    let (profile, _) = profile_pda(freelancer);
+    let (rating, _) = rating_pda(job_id);
+    send(
+        &mut env.svm,
+        &env.payer,
+        &[ix_submit_rating(
+            &client_key.pubkey(),
+            freelancer,
+            &profile,
+            &rating,
+            job_id,
+            score,
+            review_hash,
+        )],
+        &[&env.payer, client_key],
+    )
+}
+
 pub fn update_completion_for(
     env: &mut Env,
-    authority: &Pubkey,
+    authority_pk: &Pubkey,
     successful: bool,
     earnings: u64,
 ) -> Result<(), String> {
-    let (profile, _) = profile_pda(authority);
+    let (profile, _) = profile_pda(authority_pk);
     let signer = env.authority.insecure_clone();
     send(
         &mut env.svm,
         &env.payer,
-        &[ix_update_completion(&env.authority.pubkey(), &profile, successful, earnings)],
+        &[ix_update_completion(
+            &env.authority.pubkey(),
+            &profile,
+            successful,
+            earnings,
+        )],
         &[&env.payer, &signer],
     )
 }
 
 pub fn award_badge_for(
     env: &mut Env,
-    authority_pubkey: &Pubkey,
+    authority_pk: &Pubkey,
     badge_type: BadgeType,
 ) -> Result<Pubkey, String> {
-    let (profile, _) = profile_pda(authority_pubkey);
-    let (badge, _) = badge_pda(authority_pubkey, badge_type);
+    award_badge_for_with_metadata(env, authority_pk, badge_type, String::new())
+}
+
+pub fn award_badge_for_with_metadata(
+    env: &mut Env,
+    authority_pk: &Pubkey,
+    badge_type: BadgeType,
+    metadata: String,
+) -> Result<Pubkey, String> {
+    let (profile, _) = profile_pda(authority_pk);
+    let (badge, _) = badge_pda(authority_pk, badge_type);
     let signer = env.authority.insecure_clone();
     send(
         &mut env.svm,
         &env.payer,
-        &[ix_award_badge(&env.authority.pubkey(), &profile, &badge, badge_type, String::new())],
+        &[ix_award_badge(
+            &env.authority.pubkey(),
+            &profile,
+            &badge,
+            badge_type,
+            metadata,
+        )],
         &[&env.payer, &signer],
     )?;
     Ok(badge)
 }
+
+// ── Error code constants ──
+
+pub const ERR_PROFILE_ALREADY_EXISTS: &str = "0x1770";
+pub const ERR_PROFILE_NOT_FOUND: &str = "0x1771";
+pub const ERR_INVALID_RATING: &str = "0x1772";
+pub const ERR_DUPLICATE_RATING: &str = "0x1773";
+pub const ERR_BADGE_ALREADY_OWNED: &str = "0x1774";
+pub const ERR_BADGE_NOT_ELIGIBLE: &str = "0x1775";
+pub const ERR_UNAUTHORIZED: &str = "0x1776";
+pub const ERR_MATH_OVERFLOW: &str = "0x1777";
+pub const ERR_SELF_DEALING: &str = "0x1778";
+pub const ERR_METADATA_TOO_LONG: &str = "0x177a";
+
+pub const ERR_CONSTRAINT_SEEDS: &str = "0x7d6";
+pub const ERR_ACCOUNT_NOT_INITIALIZED: &str = "0xbc4";
+
+pub const DEFAULT_REVIEW_HASH: [u8; 32] = [7u8; 32];
