@@ -1,36 +1,33 @@
-"use client";
-
-import dynamic from "next/dynamic";
-import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { useEffect, useState } from "react";
-
-const WalletMultiButton = dynamic(
-  () => import("@solana/wallet-adapter-react-ui").then((m) => m.WalletMultiButton),
-  { ssr: false }
-);
+import Image from "next/image";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 
 export default function Home() {
-  const { connection } = useConnection();
-  const { publicKey } = useWallet();
-  const [balance, setBalance] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!publicKey) {
-      setBalance(null);
-      return;
-    }
-    connection.getBalance(publicKey).then((lamports) => setBalance(lamports / 1e9));
-  }, [publicKey, connection]);
-
   return (
-    <main className="flex flex-1 flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-2xl font-semibold">Solana + Next.js</h1>
-      <WalletMultiButton />
-      {publicKey && (
-        <p className="text-sm text-gray-500">
-          {publicKey.toBase58()} — {balance ?? "…"} SOL (devnet)
-        </p>
-      )}
-    </main>
+    <div className="relative">
+      <Image
+        src="/images/hero-banner.png"
+        alt="DOODLE"
+        width={1600}
+        height={900}
+        className="w-full h-auto"
+        priority
+      />
+
+      <div className="absolute inset-0 flex flex-col items-center justify-end pb-16 gap-4">
+        <div className="flex items-center gap-4">
+          <Link href="/role">
+            <Button size="lg" className="rounded-full px-8">
+              Start Hiring →
+            </Button>
+          </Link>
+          <Link href="/talent">
+            <Button size="lg" variant="ghost" className="rounded-full px-8 border border-white/10">
+              Browse Talent
+            </Button>
+          </Link>
+        </div>
+      </div>
+    </div>
   );
 }
